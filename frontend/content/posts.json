@@ -1,0 +1,10 @@
+[
+  {
+    "slug": "hello-world",
+    "title": "Welcome to Affiliate Agents",
+    "excerpt": "This is a placeholder post. Run the agents to generate real content!",
+    "content": "# Hello World
+
+The agents are ready to work. Go to your terminal and run `python agents/main_graph.py` to start generating reviews."
+  }
+]
