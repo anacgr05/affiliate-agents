@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 
 // --- Metadata dos agentes para exibição ---
@@ -68,6 +68,25 @@ const STATUS_LABELS: Record<string, { label: string; color: string }> = {
     error: { label: "Erro", color: "bg-red-500" },
 };
 
+// --- Pipeline step type ---
+type PipelineStep = { id: string; label: string; emoji: string };
+type PipelineData = {
+    is_running: boolean;
+    current_step: string | null;
+    steps_completed: string[];
+    steps: PipelineStep[];
+    elapsed_seconds: number | null;
+    error: string | null;
+};
+
+function formatElapsed(seconds: number | null): string {
+    if (!seconds) return "0s";
+    if (seconds < 60) return `${Math.round(seconds)}s`;
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.round(seconds % 60);
+    return `${mins}m ${secs}s`;
+}
+
 export default function Dashboard() {
     const [logs, setLogs] = useState<any[]>([]);
     const [status, setStatus] = useState("IDLE");
@@ -79,46 +98,69 @@ export default function Dashboard() {
     const [serverLogs, setServerLogs] = useState<string[]>([]);
     const [recommendations, setRecommendations] = useState<any[]>([]);
     const [isAnalyzing, setIsAnalyzing] = useState(false);
+    const [isStarting, setIsStarting] = useState(false);
+    const [pipeline, setPipeline] = useState<PipelineData | null>(null);
     const logsEndRef = useRef<HTMLDivElement>(null);
     const serverLogsEndRef = useRef<HTMLDivElement>(null);
 
-    const fetchStatus = async () => {
+    const fetchStatus = useCallback(async () => {
         try {
             const res = await fetch('http://localhost:8000/agent/status');
             const data = await res.json();
             setLogs(data.messages || []);
             setStatus(data.status);
             setPlan(data.plan);
+            if (data.status !== "PROCESSING") {
+                setIsStarting(false);
+            }
         } catch (e) {
             console.error("Erro ao buscar status", e);
         }
-    };
+    }, []);
 
-    const fetchExtras = async () => {
+    const fetchPipeline = useCallback(async () => {
         try {
-            const memRes = await fetch('http://localhost:8000/agent/memory');
+            const res = await fetch('http://localhost:8000/agent/pipeline');
+            const data = await res.json();
+            setPipeline(data);
+            if (!data.is_running) {
+                setIsStarting(false);
+            }
+        } catch (e) {
+            // silent — pipeline endpoint may not exist yet
+        }
+    }, []);
+
+    const fetchExtras = useCallback(async () => {
+        try {
+            const [memRes, postsRes, logsRes] = await Promise.all([
+                fetch('http://localhost:8000/agent/memory'),
+                fetch('http://localhost:8000/agent/posts'),
+                fetch('http://localhost:8000/agent/logs'),
+            ]);
             const memData = await memRes.json();
-            setMemory(memData.memory);
-
-            const postsRes = await fetch('http://localhost:8000/agent/posts');
             const postsData = await postsRes.json();
-            setPosts(postsData.posts);
-
-            const logsRes = await fetch('http://localhost:8000/agent/logs');
             const logsData = await logsRes.json();
+
+            setMemory(memData.memory);
+            setPosts(postsData.posts);
             setServerLogs(logsData.logs || []);
         } catch (e) {
             console.error("Erro ao buscar dados extras", e);
         }
-    };
+    }, []);
 
+    // Fast polling when active (1s), slow when idle (4s)
     useEffect(() => {
+        const isActive = status === "PROCESSING" || isStarting;
         const interval = setInterval(() => {
             fetchStatus();
+            fetchPipeline();
             fetchExtras();
-        }, 3000);
+        }, isActive ? 1000 : 4000);
+
         return () => clearInterval(interval);
-    }, []);
+    }, [status, isStarting, fetchStatus, fetchPipeline, fetchExtras]);
 
     useEffect(() => {
         logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -129,13 +171,24 @@ export default function Dashboard() {
     }, [serverLogs.length]);
 
     const startAgent = async () => {
-        if (!topic) return;
-        await fetch('http://localhost:8000/agent/start', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ topic }),
-        });
+        if (!topic || isStarting) return;
+        setIsStarting(true);
+        setStatus("PROCESSING");
+        setPipeline(null);  // Reset pipeline display
+        try {
+            await fetch('http://localhost:8000/agent/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ topic }),
+            });
+        } catch (e) {
+            console.error("Erro ao iniciar agente", e);
+            setIsStarting(false);
+        }
         setTopic("");
+        // Immediately fetch pipeline status
+        fetchPipeline();
+        fetchStatus();
     };
 
     const runAnalysis = async () => {
@@ -174,6 +227,81 @@ export default function Dashboard() {
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 h-[calc(100vh-140px)]">
                 {/* Área principal (Chat + Terminal) */}
                 <div className="lg:col-span-2 flex flex-col gap-6 h-full">
+
+                    {/* Pipeline Progress — only visible when running */}
+                    {(status === "PROCESSING" || isStarting) && pipeline?.steps && (
+                        <div className="border border-blue-200 rounded-xl p-5 bg-white shadow-sm shrink-0">
+                            <div className="flex items-center justify-between mb-3">
+                                <h2 className="text-sm font-semibold text-blue-700 flex items-center gap-2">
+                                    <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></span>
+                                    Pipeline em execução
+                                </h2>
+                                <span className="text-xs text-gray-500 font-mono">
+                                    ⏱ {formatElapsed(pipeline.elapsed_seconds)}
+                                </span>
+                            </div>
+
+                            {/* Step indicators */}
+                            <div className="flex items-center gap-1">
+                                {pipeline.steps.map((step, i) => {
+                                    const isCompleted = pipeline.steps_completed.includes(step.id);
+                                    const isCurrent = pipeline.current_step === step.id;
+                                    const isPending = !isCompleted && !isCurrent;
+
+                                    return (
+                                        <div key={step.id} className="flex items-center flex-1 min-w-0">
+                                            <div className="flex flex-col items-center flex-1 min-w-0">
+                                                {/* Step circle */}
+                                                <div className={`
+                                                    w-8 h-8 rounded-full flex items-center justify-center text-sm
+                                                    transition-all duration-500
+                                                    ${isCompleted ? 'bg-green-100 border-2 border-green-400' : ''}
+                                                    ${isCurrent ? 'bg-blue-100 border-2 border-blue-500 animate-pulse ring-4 ring-blue-100' : ''}
+                                                    ${isPending ? 'bg-gray-100 border-2 border-gray-200' : ''}
+                                                `}>
+                                                    {isCompleted ? '✅' : step.emoji}
+                                                </div>
+                                                {/* Step label */}
+                                                <span className={`
+                                                    text-[10px] mt-1 text-center leading-tight truncate w-full px-1
+                                                    ${isCurrent ? 'text-blue-700 font-semibold' : ''}
+                                                    ${isCompleted ? 'text-green-600' : ''}
+                                                    ${isPending ? 'text-gray-400' : ''}
+                                                `}>
+                                                    {step.label.split(' ').slice(0, 2).join(' ')}
+                                                </span>
+                                            </div>
+                                            {/* Connector line */}
+                                            {i < pipeline.steps.length - 1 && (
+                                                <div className={`
+                                                    h-0.5 w-4 shrink-0 mx-0.5 mt-[-12px]
+                                                    ${isCompleted ? 'bg-green-300' : 'bg-gray-200'}
+                                                `}></div>
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+
+                            {/* Current action description */}
+                            {pipeline.current_step && (
+                                <div className="mt-3 pt-3 border-t border-blue-100">
+                                    <p className="text-xs text-blue-600 flex items-center gap-2">
+                                        <span className="inline-block w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse"></span>
+                                        {pipeline.steps.find(s => s.id === pipeline.current_step)?.emoji}{' '}
+                                        {pipeline.steps.find(s => s.id === pipeline.current_step)?.label}...
+                                    </p>
+                                </div>
+                            )}
+
+                            {/* Error display */}
+                            {pipeline.error && (
+                                <div className="mt-3 pt-3 border-t border-red-200">
+                                    <p className="text-xs text-red-600">❌ Erro: {pipeline.error}</p>
+                                </div>
+                            )}
+                        </div>
+                    )}
                     {/* Conversa dos Agentes */}
                     <div className="flex-1 border border-gray-200 rounded-xl p-6 bg-white flex flex-col shadow-sm min-h-0">
                         <h2 className="text-xl font-semibold mb-4 border-b border-gray-100 pb-2 text-gray-800">
@@ -249,13 +377,20 @@ export default function Dashboard() {
                                 onChange={(e) => setTopic(e.target.value)}
                                 onKeyDown={(e) => e.key === 'Enter' && startAgent()}
                                 placeholder="Ex: Melhores mouses gamer 2026"
-                                className="flex-1 bg-white border border-gray-300 rounded px-3 py-2 text-gray-900 focus:outline-none focus:border-blue-500 placeholder-gray-400"
+                                disabled={isStarting}
+                                className="flex-1 bg-white border border-gray-300 rounded px-3 py-2 text-gray-900 focus:outline-none focus:border-blue-500 placeholder-gray-400 disabled:opacity-50"
                             />
                             <button
                                 onClick={startAgent}
-                                className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded font-medium transition-colors shadow-sm"
+                                disabled={isStarting || !topic}
+                                className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded font-medium transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed min-w-[90px]"
                             >
-                                Iniciar
+                                {isStarting ? (
+                                    <span className="flex items-center gap-2">
+                                        <span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+                                        <span>...</span>
+                                    </span>
+                                ) : 'Iniciar'}
                             </button>
                         </div>
                     </div>
