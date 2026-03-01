@@ -1,14 +1,21 @@
 import os
 import json
+import requests
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
 
-from memory import MemoryManager
+try:
+    from agents.memory import MemoryManager
+except ImportError:
+    from memory import MemoryManager
 
 class ProductManagerAgent:
     def __init__(self):
@@ -16,30 +23,67 @@ class ProductManagerAgent:
         self.llm = ChatOpenAI(
             openai_api_key=os.getenv("OPENROUTER_API_KEY"),
             openai_api_base="https://openrouter.ai/api/v1",
-            model_name="anthropic/claude-3.5-sonnet", # Upgraded for better writing
+            model_name="openrouter/auto", # Auto-routing as requested
             temperature=0.7
         )
+        self.search_api_key = os.getenv("SEARCHAPI_KEY")
         
         self.system_prompt = """
-        You are the Product Manager and Lead Content Strategist for a top-tier affiliate marketing site.
-        Your goal is to take raw product data and market analysis and turn it into engaging, high-converting, and SEO-optimized content.
+        You are the Product Manager and Lead Content Strategist for a top-tier affiliate marketing site in Brazil.
+        Your goal is to take raw product data and market analysis and turn it into a high-converting "Landing Page" style review.
+        
+        CONTEXT:
+        - Current Year: 2026
+        - Target Audience: Brazilian Consumers
+        - Language: Portuguese (PT-BR)
+        
+        Instead of a single markdown file, you must output a STRUCTURED JSON object that drives a rich frontend layout.
         
         Your responsibilities:
-        1. Write a catchy, SEO-friendly title for the article.
-        2. Write a compelling introduction that hooks the reader.
-        3. Create detailed reviews for each recommended product, highlighting pros, cons, and who it is for.
-        4. Ensure the tone is helpful, authoritative, and unbiased.
-        5. Structure the content in Markdown format.
+        1. Create a "Hero" section with a strong headline and subtitle.
+        2. Select the top products and create detailed cards for them (Pros, Cons, Verdict).
+        3. Write a "Buying Guide" with clear steps.
+        4. Create a "FAQ" section.
+        5. IMPORTANT: If you see multiple offers for the SAME product from different stores in the input data, GROUP them into a single product entry and list all the links in the 'affiliate_links' array. This allows for price comparison.
+        6. Generate a creative "image_prompt" for the hero section. The style should be "not too realistic, believable, illustrative style". It should depict the essence of the topic without text.
         
         CONSIDER PAST DECISIONS:
         {memory_context}
         
         Input: A topic and a list of recommended products with analysis.
-        Output: A JSON object containing:
-            - "slug": URL-friendly slug.
-            - "title": SEO Title.
-            - "excerpt": Short summary for the card.
-            - "content": Full Markdown article.
+        Output: A JSON object with the following EXACT structure:
+        {{
+          "slug": "url-slug",
+          "title": "SEO Title",
+          "excerpt": "Short summary for SEO/Home page",
+          "hero": {{
+            "title": "Main Headline",
+            "subtitle": "Subheadline",
+            "image_prompt": "A creative prompt for an AI image generator...",
+            "image": "https://placehold.co/1200x600?text=Hero+Image" 
+          }},
+          "products": [
+            {{
+              "name": "Product Name",
+              "price": "Approx Price",
+              "rating": 4.8,
+              "pros": ["Pro 1", "Pro 2"],
+              "cons": ["Con 1"],
+              "verdict": "Best for...",
+              "affiliate_links": [
+                {{"store": "Amazon", "url": "https://...", "price": "R$ 100"}}
+              ]
+            }}
+          ],
+          "buying_guide": {{
+            "steps": [
+              {{"title": "Step Title", "content": "Step description..."}}
+            ]
+          }},
+          "faq": [
+            {{"question": "...", "answer": "..."}}
+          ]
+        }}
         """
         
         self.prompt = ChatPromptTemplate.from_messages([
@@ -76,7 +120,7 @@ class ProductManagerAgent:
         self.plan_chain = self.plan_prompt | self.llm | StrOutputParser()
 
     def create_plan(self, topic, recommendations, critic_feedback="", human_feedback=""):
-        print(f"📝 Product Manager planning for: {topic}...")
+        logger.info(f"📝 Product Manager planning for: {topic}...")
         
         # Retrieve context
         context = self.memory.retrieve_relevant_context(topic)
@@ -94,8 +138,9 @@ class ProductManagerAgent:
             })
             cleaned_response = response.replace("```json", "").replace("```", "").strip()
             return json.loads(cleaned_response)
+            return json.loads(cleaned_response)
         except Exception as e:
-            print(f"❌ Error generating plan: {e}")
+            logger.error(f"❌ Error generating plan: {e}")
             # Fallback plan if LLM fails
             return {
                 "topic": topic,
@@ -106,7 +151,7 @@ class ProductManagerAgent:
             }
 
     def create_content(self, topic, recommendations):
-        print(f"✍️ Product Manager writing content for: {topic}...")
+        logger.info(f"✍️ Product Manager writing content for: {topic}...")
         
         # Retrieve context
         context = self.memory.retrieve_relevant_context(topic)
@@ -119,15 +164,87 @@ class ProductManagerAgent:
             })
             # Clean up potential markdown code blocks
             cleaned_response = response.replace("```json", "").replace("```", "").strip()
+            
+            # Attempt to find the first '{' and last '}' to isolate JSON
+            import re
+            json_match = re.search(r'\{.*\}', cleaned_response, re.DOTALL)
+            if json_match:
+                cleaned_response = json_match.group(0)
+            
             # Remove potential invalid control characters
             cleaned_response = "".join(c for c in cleaned_response if c >= ' ' or c == '\n' or c == '\r' or c == '\t')
             
             return json.loads(cleaned_response, strict=False)
         except Exception as e:
-            print(f"❌ Error generating content: {e}")
-            print(f"Raw response was: {response[:200]}...") # Debugging aid
+            logger.error(f"❌ Error generating content: {e}")
+            logger.error(f"Raw response was: {response}...") # Print full response for debugging
             return None
 
+    def find_product_offers(self, product_name):
+        """Searches for specific offers for a product to populate affiliate links."""
+        if not self.search_api_key:
+            logger.warning("⚠️ No SearchAPI key found, skipping price enrichment.")
+            return []
+
+        query = f"{product_name} comprar brasil"
+        url = "https://www.searchapi.io/api/v1/search"
+        params = {
+            "engine": "google_shopping",
+            "q": query,
+            "api_key": self.search_api_key,
+            "location": "Brazil",
+            "google_domain": "google.com.br",
+            "gl": "br",
+            "hl": "pt"
+        }
+
+        try:
+            logger.info(f"💰 Searching offers for: {product_name}...")
+            response = requests.get(url, params=params, timeout=15)
+            if response.status_code != 200:
+                logger.error(f"❌ SearchAPI failed: {response.status_code} {response.text}")
+                return []
+                
+            data = response.json()
+            results = data.get("shopping_results", [])
+            
+            offers = []
+            seen_stores = set()
+            
+            # Prioritize major retailers
+            priority_stores = ["Amazon", "Mercado Livre", "Kabum", "Pichau", "Terabyte", "Magalu", "Casas Bahia"]
+            
+            for item in results:
+                store = item.get("source")
+                if not store:
+                    continue
+                    
+                # Simple normalization for deduping
+                store_norm = store.lower().replace(" ", "")
+                if store_norm in seen_stores:
+                    continue
+                
+                # Create offer object
+                offer = {
+                    "store": store,
+                    "price": item.get("price"),
+                    "url": item.get("product_link"),
+                    "title": item.get("title") # Optional, for debugging
+                }
+                
+                offers.append(offer)
+                seen_stores.add(store_norm)
+                
+                if len(offers) >= 5: # Limit to top 5 distinct stores
+                    break
+            
+            return offers
+
+        except Exception as e:
+            logger.error(f"❌ Error finding offers for {product_name}: {e}")
+            return []
+
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     pm = ProductManagerAgent()
-    print("Product Manager Initialized.")
+    logger.info("Product Manager Initialized.")
