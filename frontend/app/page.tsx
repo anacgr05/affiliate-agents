@@ -5,41 +5,68 @@ export default function Home() {
   const posts = getPosts();
 
   return (
-    <main className="flex min-h-screen flex-col items-center p-24 relative overflow-hidden">
-      {/* Background Gradients */}
-      <div className="absolute top-0 left-0 w-full h-full overflow-hidden -z-10">
-        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] rounded-full bg-blue-600/20 blur-[120px]" />
-        <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] rounded-full bg-purple-600/20 blur-[120px]" />
+    <main className="min-h-screen bg-gray-50">
+      {/* Hero Section */}
+      <div className="bg-white border-b border-gray-200 py-20 px-6">
+        <div className="max-w-4xl mx-auto text-center">
+          <h1 className="text-5xl font-bold tracking-tight text-gray-900 mb-6">
+            Reviews que <span className="text-blue-600">Funcionam</span>
+          </h1>
+          <p className="text-xl text-gray-600 max-w-2xl mx-auto">
+            Análises detalhadas, imparciais e diretas ao ponto para ajudar você a fazer a melhor escolha.
+          </p>
+        </div>
       </div>
 
-      <div className="relative flex place-items-center mb-16 z-[-1]">
-        <h1 className="text-6xl font-bold tracking-tighter text-center">
-          Affiliate <span className="text-gradient">Agents</span>
-        </h1>
-      </div>
+      {/* Content Grid */}
+      <div className="max-w-7xl mx-auto px-6 py-16">
+        <h2 className="text-2xl font-bold text-gray-900 mb-8">Últimas Análises</h2>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 max-w-6xl w-full">
-        {posts.map((post) => (
-          <Link href={`/posts/${post.slug}`} key={post.slug} className="group">
-            <div className="h-full rounded-xl border border-white/10 bg-white/5 p-6 backdrop-blur-sm transition-all hover:bg-white/10 hover:border-white/20">
-              <h2 className="mb-3 text-2xl font-semibold group-hover:text-blue-400 transition-colors">
-                {post.title}
-              </h2>
-              <p className="text-sm text-gray-400 line-clamp-3">
-                {post.excerpt}
-              </p>
-              <div className="mt-4 flex items-center text-sm text-blue-400 font-medium">
-                Read Review <span className="ml-2 transition-transform group-hover:translate-x-1">-&gt;</span>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+          {posts.map((post) => (
+            <Link href={`/reviews/${post.slug}`} key={post.slug} className="group">
+              <div className="h-full bg-white rounded-2xl border border-gray-200 overflow-hidden hover:shadow-lg transition-all duration-300 hover:-translate-y-1">
+                {post.hero?.image && (
+                  <div className="h-48 bg-gray-100 relative overflow-hidden">
+                    {/* Placeholder for actual image rendering if we had one, using the URL from JSON */}
+                    <img src={post.hero.image} alt={post.title} className="w-full h-full object-cover" />
+                  </div>
+                )}
+                <div className="p-6">
+                  <div className="flex items-center gap-2 mb-3">
+                    <span className="bg-blue-100 text-blue-700 text-xs font-bold px-2 py-1 rounded-full uppercase tracking-wide">
+                      Review
+                    </span>
+                    <span className="text-gray-400 text-xs">5 min de leitura</span>
+                  </div>
+                  <h3 className="text-xl font-bold text-gray-900 mb-3 group-hover:text-blue-600 transition-colors line-clamp-2">
+                    {post.title}
+                  </h3>
+                  <p className="text-gray-600 text-sm line-clamp-3 mb-4">
+                    {post.excerpt}
+                  </p>
+                  <div className="flex items-center text-blue-600 font-medium text-sm">
+                    Ler Análise Completa
+                    <svg className="w-4 h-4 ml-1 group-hover:translate-x-1 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 8l4 4m0 0l-4 4m4-4H3" />
+                    </svg>
+                  </div>
+                </div>
               </div>
-            </div>
-          </Link>
-        ))}
+            </Link>
+          ))}
 
-        {posts.length === 0 && (
-          <div className="col-span-full text-center text-gray-500">
-            No posts generated yet. Run the agents!
-          </div>
-        )}
+          {posts.length === 0 && (
+            <div className="col-span-full text-center py-20 bg-white rounded-2xl border border-dashed border-gray-300">
+              <div className="text-gray-400 mb-4 text-4xl">🤖</div>
+              <h3 className="text-lg font-medium text-gray-900">Nenhum review gerado ainda</h3>
+              <p className="text-gray-500">Vá ao Dashboard para criar seu primeiro conteúdo.</p>
+              <Link href="/admin/dashboard" className="inline-block mt-4 px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors">
+                Ir para Dashboard
+              </Link>
+            </div>
+          )}
+        </div>
       </div>
     </main>
   );
