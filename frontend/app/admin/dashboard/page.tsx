@@ -2,6 +2,72 @@
 import { useEffect, useState, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 
+// --- Metadata dos agentes para exibição ---
+const AGENT_INFO: Record<string, { label: string; emoji: string; color: string; bgColor: string; borderColor: string }> = {
+    ceo: {
+        label: "CEO",
+        emoji: "👔",
+        color: "text-indigo-700",
+        bgColor: "bg-indigo-50",
+        borderColor: "border-indigo-200",
+    },
+    portfolio_manager: {
+        label: "Gestor de Portfólio",
+        emoji: "💼",
+        color: "text-blue-700",
+        bgColor: "bg-blue-50",
+        borderColor: "border-blue-200",
+    },
+    product_manager: {
+        label: "Gestor de Produto",
+        emoji: "📝",
+        color: "text-emerald-700",
+        bgColor: "bg-emerald-50",
+        borderColor: "border-emerald-200",
+    },
+    critic: {
+        label: "Crítico de Qualidade",
+        emoji: "🧐",
+        color: "text-amber-700",
+        bgColor: "bg-amber-50",
+        borderColor: "border-amber-200",
+    },
+    writer: {
+        label: "Redator",
+        emoji: "✍️",
+        color: "text-purple-700",
+        bgColor: "bg-purple-50",
+        borderColor: "border-purple-200",
+    },
+    human: {
+        label: "Você",
+        emoji: "👤",
+        color: "text-sky-700",
+        bgColor: "bg-sky-50",
+        borderColor: "border-sky-200",
+    },
+};
+
+const DEFAULT_AGENT = {
+    label: "Sistema",
+    emoji: "⚙️",
+    color: "text-gray-700",
+    bgColor: "bg-gray-50",
+    borderColor: "border-gray-200",
+};
+
+function getAgentInfo(name: string) {
+    return AGENT_INFO[name] || DEFAULT_AGENT;
+}
+
+// --- Labels de status ---
+const STATUS_LABELS: Record<string, { label: string; color: string }> = {
+    IDLE: { label: "Aguardando", color: "bg-gray-400" },
+    PROCESSING: { label: "Processando...", color: "bg-green-500 animate-pulse" },
+    WAITING_FOR_APPROVAL: { label: "Aguardando Aprovação", color: "bg-yellow-500 animate-pulse" },
+    error: { label: "Erro", color: "bg-red-500" },
+};
+
 export default function Dashboard() {
     const [logs, setLogs] = useState<any[]>([]);
     const [status, setStatus] = useState("IDLE");
@@ -24,7 +90,7 @@ export default function Dashboard() {
             setStatus(data.status);
             setPlan(data.plan);
         } catch (e) {
-            console.error("Failed to fetch status", e);
+            console.error("Erro ao buscar status", e);
         }
     };
 
@@ -42,7 +108,7 @@ export default function Dashboard() {
             const logsData = await logsRes.json();
             setServerLogs(logsData.logs || []);
         } catch (e) {
-            console.error("Failed to fetch extras", e);
+            console.error("Erro ao buscar dados extras", e);
         }
     };
 
@@ -79,7 +145,7 @@ export default function Dashboard() {
             const data = await res.json();
             setRecommendations(data.recommendations || []);
         } catch (e) {
-            console.error("Analysis failed", e);
+            console.error("Análise falhou", e);
         }
         setIsAnalyzing(false);
     };
@@ -93,38 +159,72 @@ export default function Dashboard() {
         setComment("");
     };
 
+    const statusInfo = STATUS_LABELS[status] || STATUS_LABELS.IDLE;
+
     return (
         <main className="min-h-screen bg-gray-50 text-gray-900 p-8 font-sans">
             <header className="mb-8 flex justify-between items-center border-b border-gray-200 pb-4">
-                <h1 className="text-3xl font-bold text-blue-600">🤖 Agent Command Center</h1>
+                <h1 className="text-3xl font-bold text-blue-600">🤖 Central de Comando</h1>
                 <div className="flex items-center gap-2 bg-white px-3 py-1 rounded-full border border-gray-300 shadow-sm">
-                    <span className={`w-3 h-3 rounded-full ${status === 'PROCESSING' ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`}></span>
-                    <span className="text-sm font-mono text-gray-600">{status}</span>
+                    <span className={`w-3 h-3 rounded-full ${statusInfo.color}`}></span>
+                    <span className="text-sm font-mono text-gray-600">{statusInfo.label}</span>
                 </div>
             </header>
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 h-[calc(100vh-140px)]">
-                {/* Main Content Area (Chat + Terminal) */}
+                {/* Área principal (Chat + Terminal) */}
                 <div className="lg:col-span-2 flex flex-col gap-6 h-full">
-                    {/* Live Logs */}
+                    {/* Conversa dos Agentes */}
                     <div className="flex-1 border border-gray-200 rounded-xl p-6 bg-white flex flex-col shadow-sm min-h-0">
-                        <h2 className="text-xl font-semibold mb-4 border-b border-gray-100 pb-2 text-gray-800">Live Conversation</h2>
+                        <h2 className="text-xl font-semibold mb-4 border-b border-gray-100 pb-2 text-gray-800">
+                            Conversa dos Agentes
+                        </h2>
                         <div className="flex-1 overflow-y-auto space-y-4 pr-2 scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent">
-                            {logs.map((msg, i) => (
-                                <div key={i} className={`p-4 rounded-lg ${msg.role === 'human' ? 'bg-blue-50 border border-blue-100' : 'bg-gray-50 border border-gray-100'}`}>
-                                    <strong className="block text-xs uppercase text-gray-500 mb-1">{msg.role}</strong>
-                                    <div className="prose prose-sm max-w-none text-gray-800 break-words overflow-x-auto">
-                                        <ReactMarkdown>{msg.content}</ReactMarkdown>
-                                    </div>
+                            {logs.length === 0 && (
+                                <div className="flex items-center justify-center h-full text-gray-400 italic">
+                                    Nenhuma mensagem ainda. Inicie uma nova missão.
                                 </div>
-                            ))}
+                            )}
+                            {logs.map((msg, i) => {
+                                const agent = getAgentInfo(msg.name || msg.role);
+                                const isHuman = msg.role === 'human';
+                                return (
+                                    <div
+                                        key={i}
+                                        className={`rounded-lg border ${agent.borderColor} ${agent.bgColor} overflow-hidden`}
+                                    >
+                                        {/* Cabeçalho do agente */}
+                                        <div className={`px-4 py-2 border-b ${agent.borderColor} flex items-center gap-2`}>
+                                            <span className="text-lg">{agent.emoji}</span>
+                                            <span className={`text-sm font-semibold ${agent.color}`}>
+                                                {agent.label}
+                                            </span>
+                                            {isHuman && (
+                                                <span className="ml-auto text-xs bg-sky-100 text-sky-600 px-2 py-0.5 rounded-full">
+                                                    Revisão Humana
+                                                </span>
+                                            )}
+                                        </div>
+                                        {/* Conteúdo da mensagem */}
+                                        <div className="px-4 py-3">
+                                            <div className="prose prose-sm max-w-none text-gray-800 break-words overflow-x-auto
+                                                prose-strong:text-gray-900
+                                                prose-blockquote:border-l-4 prose-blockquote:border-gray-300 prose-blockquote:pl-4 prose-blockquote:text-gray-600
+                                                prose-li:text-gray-700
+                                                prose-p:leading-relaxed">
+                                                <ReactMarkdown>{msg.content}</ReactMarkdown>
+                                            </div>
+                                        </div>
+                                    </div>
+                                );
+                            })}
                             <div ref={logsEndRef} />
                         </div>
                     </div>
 
-                    {/* Backend Terminal */}
+                    {/* Terminal do Backend */}
                     <div className="border border-gray-200 rounded-xl p-6 bg-gray-900 text-green-400 flex flex-col shadow-sm font-mono text-xs h-48 shrink-0">
-                        <h2 className="text-sm font-bold mb-2 text-gray-400 border-b border-gray-700 pb-1">Backend Terminal Output</h2>
+                        <h2 className="text-sm font-bold mb-2 text-gray-400 border-b border-gray-700 pb-1">Terminal do Backend</h2>
                         <div className="flex-1 overflow-y-auto space-y-1">
                             {serverLogs.map((log, i) => (
                                 <div key={i} className="break-words">
@@ -137,38 +237,39 @@ export default function Dashboard() {
                     </div>
                 </div>
 
-                {/* Sidebar Controls */}
+                {/* Controles laterais */}
                 <div className="space-y-6 h-full overflow-y-auto pr-2">
-                    {/* Start Panel */}
+                    {/* Nova Missão */}
                     <div className="border border-gray-200 rounded-xl p-6 bg-white shadow-sm">
-                        <h2 className="text-xl font-semibold mb-4 text-gray-800">New Mission</h2>
+                        <h2 className="text-xl font-semibold mb-4 text-gray-800">Nova Missão</h2>
                         <div className="flex gap-2">
                             <input
                                 type="text"
                                 value={topic}
                                 onChange={(e) => setTopic(e.target.value)}
-                                placeholder="Enter topic (e.g. Best Gaming Mouse)"
+                                onKeyDown={(e) => e.key === 'Enter' && startAgent()}
+                                placeholder="Ex: Melhores mouses gamer 2026"
                                 className="flex-1 bg-white border border-gray-300 rounded px-3 py-2 text-gray-900 focus:outline-none focus:border-blue-500 placeholder-gray-400"
                             />
                             <button
                                 onClick={startAgent}
                                 className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded font-medium transition-colors shadow-sm"
                             >
-                                Start
+                                Iniciar
                             </button>
                         </div>
                     </div>
 
-                    {/* Analyst Insights */}
+                    {/* Insights do Analista */}
                     <div className="border border-purple-200 rounded-xl p-6 bg-purple-50 shadow-sm">
                         <div className="flex justify-between items-center mb-4">
-                            <h2 className="text-xl font-semibold text-purple-800">🔮 Analyst Insights</h2>
+                            <h2 className="text-xl font-semibold text-purple-800">🔮 Insights do Analista</h2>
                             <button
                                 onClick={runAnalysis}
                                 disabled={isAnalyzing}
                                 className="text-xs bg-purple-600 text-white px-3 py-1 rounded hover:bg-purple-700 disabled:opacity-50 transition-colors"
                             >
-                                {isAnalyzing ? 'Analyzing...' : 'Auto-Analyze'}
+                                {isAnalyzing ? 'Analisando...' : 'Analisar'}
                             </button>
                         </div>
 
@@ -178,33 +279,34 @@ export default function Dashboard() {
                                     <div key={i} className="bg-white p-3 rounded border border-purple-100 hover:border-purple-300 cursor-pointer transition-colors group" onClick={() => setTopic(rec.topic)}>
                                         <div className="flex justify-between items-start">
                                             <h3 className="font-medium text-purple-900 group-hover:text-purple-700">{rec.topic}</h3>
-                                            <span className="text-xs text-purple-400 opacity-0 group-hover:opacity-100 transition-opacity">Click to use</span>
+                                            <span className="text-xs text-purple-400 opacity-0 group-hover:opacity-100 transition-opacity">Clique para usar</span>
                                         </div>
                                         <p className="text-xs text-purple-600 mt-1">{rec.reason}</p>
                                     </div>
                                 ))}
                             </div>
                         ) : (
-                            <p className="text-sm text-purple-400 italic">Run analysis to find content gaps.</p>
+                            <p className="text-sm text-purple-400 italic">Execute a análise para encontrar lacunas de conteúdo.</p>
                         )}
                     </div>
 
-                    {/* Approval Panel */}
+                    {/* Painel de Aprovação */}
                     {status === 'WAITING_FOR_APPROVAL' && plan && (
                         <div className="border border-yellow-200 rounded-xl p-6 bg-yellow-50 animate-in fade-in slide-in-from-bottom-4 shadow-sm">
-                            <h2 className="text-xl font-semibold mb-4 text-yellow-700">⚠️ Approval Required</h2>
+                            <h2 className="text-xl font-semibold mb-4 text-yellow-700">⚠️ Aprovação Necessária</h2>
 
-                            <div className="bg-white p-4 rounded mb-4 text-sm border border-gray-200 text-gray-700">
-                                <p><strong className="text-gray-900">Topic:</strong> {plan.topic}</p>
-                                <p><strong className="text-gray-900">Angle:</strong> {plan.angle}</p>
-                                <p><strong className="text-gray-900">Products:</strong> {plan.key_products?.length}</p>
+                            <div className="bg-white p-4 rounded mb-4 text-sm border border-gray-200 text-gray-700 space-y-1">
+                                <p><strong className="text-gray-900">Tópico:</strong> {plan.topic}</p>
+                                <p><strong className="text-gray-900">Ângulo:</strong> {plan.angle}</p>
+                                <p><strong className="text-gray-900">Público:</strong> {plan.target_audience || 'N/A'}</p>
+                                <p><strong className="text-gray-900">Produtos:</strong> {plan.key_products?.join(', ') || 'Nenhum'}</p>
                             </div>
 
                             <div className="space-y-3">
                                 <textarea
                                     value={comment}
                                     onChange={(e) => setComment(e.target.value)}
-                                    placeholder="Feedback (if rejecting)..."
+                                    placeholder="Comentários (caso rejeite)..."
                                     className="w-full bg-white border border-gray-300 rounded px-3 py-2 text-gray-900 text-sm focus:outline-none focus:border-yellow-500 placeholder-gray-400"
                                     rows={3}
                                 />
@@ -213,13 +315,13 @@ export default function Dashboard() {
                                         onClick={() => sendFeedback(false)}
                                         className="flex-1 bg-red-100 hover:bg-red-200 text-red-700 border border-red-200 px-4 py-2 rounded font-medium transition-colors"
                                     >
-                                        Reject
+                                        Rejeitar
                                     </button>
                                     <button
                                         onClick={() => sendFeedback(true)}
                                         className="flex-1 bg-green-100 hover:bg-green-200 text-green-700 border border-green-200 px-4 py-2 rounded font-medium transition-colors"
                                     >
-                                        Approve
+                                        Aprovar
                                     </button>
                                 </div>
                             </div>
@@ -228,25 +330,25 @@ export default function Dashboard() {
 
                     {status === 'IDLE' && (
                         <div className="text-center text-gray-400 mt-10 p-4 border border-dashed border-gray-200 rounded-lg">
-                            <p>System Ready. Waiting for input.</p>
+                            <p>Sistema pronto. Aguardando entrada.</p>
                         </div>
                     )}
 
-                    {/* Memory Bank */}
+                    {/* Banco de Memória */}
                     <div className="border border-gray-200 rounded-xl p-6 bg-white shadow-sm">
-                        <h2 className="text-xl font-semibold mb-4 text-gray-800">🧠 Memory Bank</h2>
+                        <h2 className="text-xl font-semibold mb-4 text-gray-800">🧠 Banco de Memória</h2>
                         <div className="bg-gray-50 p-4 rounded border border-gray-100 text-sm text-gray-600 max-h-40 overflow-y-auto">
                             {memory ? (
                                 <p className="whitespace-pre-wrap">{memory}</p>
                             ) : (
-                                <p className="italic">No memories found yet.</p>
+                                <p className="italic">Nenhuma memória registrada ainda.</p>
                             )}
                         </div>
                     </div>
 
-                    {/* Recent Drafts */}
+                    {/* Rascunhos Recentes */}
                     <div className="border border-gray-200 rounded-xl p-6 bg-white shadow-sm">
-                        <h2 className="text-xl font-semibold mb-4 text-gray-800">📄 Recent Drafts</h2>
+                        <h2 className="text-xl font-semibold mb-4 text-gray-800">📄 Rascunhos Recentes</h2>
                         <div className="space-y-2">
                             {posts.length > 0 ? posts.slice(-3).reverse().map((post, i) => (
                                 <div key={i} className="p-3 bg-gray-50 rounded border border-gray-100">
@@ -254,7 +356,7 @@ export default function Dashboard() {
                                     <p className="text-xs text-gray-500">{post.slug}</p>
                                 </div>
                             )) : (
-                                <p className="text-sm text-gray-500 italic">No drafts created yet.</p>
+                                <p className="text-sm text-gray-500 italic">Nenhum rascunho criado ainda.</p>
                             )}
                         </div>
                     </div>

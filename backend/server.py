@@ -78,15 +78,15 @@ def start_agent(req: StartRequest):
     global current_thread_id, config
     current_thread_id = str(uuid.uuid4()) # New session
     config = {"configurable": {"thread_id": current_thread_id}}
-    
+
     initial_state = {
-        "messages": [HumanMessage(content=f"Start research on: {req.topic}")],
+        "messages": [HumanMessage(content=f"Iniciar pesquisa sobre: {req.topic}", name="human")],
         "current_topic": req.topic,
         "recommendations": [],
         "content_plan": {},
         "human_feedback": ""
     }
-    
+
     # Run until interrupt
     # We run this in a thread or just await if it was async, but graph.stream is sync generator usually unless using astream
     # For simplicity, we'll iterate until it stops
@@ -104,19 +104,26 @@ async def get_status():
         state_snapshot = graph_app.get_state(config)
         current_state = state_snapshot.values
         next_step = state_snapshot.next
-        
+
         messages = []
         if "messages" in current_state:
-            # Convert messages to string format for JSON
-            messages = [{"role": m.type, "content": m.content} for m in current_state["messages"]]
-            
+            # Convert messages to dict format for JSON, including agent name
+            messages = [
+                {
+                    "role": m.type,
+                    "name": getattr(m, "name", None) or m.type,
+                    "content": m.content,
+                }
+                for m in current_state["messages"]
+            ]
+
         status = "IDLE"
         if next_step:
             if "human" in next_step:
                 status = "WAITING_FOR_APPROVAL"
             else:
                 status = "PROCESSING"
-        
+
         return {
             "status": status,
             "messages": messages,
@@ -128,10 +135,10 @@ async def get_status():
 @app.post("/agent/feedback")
 def submit_feedback(req: FeedbackRequest):
     feedback_str = "y" if req.approved else f"n. {req.comments}"
-    
+
     # Update state with feedback
     graph_app.update_state(config, {"human_feedback": feedback_str})
-    
+
     # Resume execution
     try:
         # Pass None as input to resume
@@ -145,11 +152,11 @@ def submit_feedback(req: FeedbackRequest):
 async def get_memory():
     try:
         mem = MemoryManager()
-        # Retrieve all or recent memories. 
+        # Retrieve all or recent memories.
         # For now, let's just search for a generic term or get the last few if possible.
         # The current MemoryManager only has retrieve_relevant_context.
         # Let's assume we want to see everything relevant to "product".
-        # Or better, we can add a method to MemoryManager to get recent items, 
+        # Or better, we can add a method to MemoryManager to get recent items,
         # but for now let's query broadly.
         # Retrieve relevant context. Using a broad query to get recent general feedback.
         context = mem.retrieve_relevant_context("feedback decision rationale", k=5)
@@ -163,7 +170,7 @@ async def get_posts():
         # Path to shared data directory
         current_dir = os.path.dirname(os.path.abspath(__file__))
         posts_file = os.path.join(current_dir, "..", "data", "posts.json")
-        
+
         if os.path.exists(posts_file):
             with open(posts_file, "r") as f:
                 posts = json.load(f)
@@ -188,7 +195,7 @@ def analyze_portfolio():
         if os.path.exists(posts_file):
             with open(posts_file, "r") as f:
                 posts = json.load(f)
-        
+
         recommendations = analyst.analyze_portfolio(posts)
         return recommendations
     except Exception as e:

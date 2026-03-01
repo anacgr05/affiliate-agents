@@ -16,9 +16,12 @@ def ceo_node(state):
     """The CEO decides the strategy or delegates."""
     logger.info("👔 CEO: Assessing strategy...")
     topic = state.get("current_topic")
-    message = f"Strategic Directive: Analyze market for '{topic}' and identify high-potential products."
+    message = (
+        f"**Diretiva Estratégica**\n\n"
+        f"Analisar o mercado para **'{topic}'** e identificar os produtos com maior potencial de conversão."
+    )
     return {
-        "messages": [AIMessage(content=message)]
+        "messages": [AIMessage(content=message, name="ceo")]
     }
 
 
@@ -32,11 +35,28 @@ def portfolio_node(state):
 
     raw_products = pm_agent.search_products(topic)
 
-    message = f"Market Analysis Complete. Found {len(raw_products)} products. Recommendation: {recommendations[:100]}..."
+    # Build a clean product summary for the message
+    product_lines = []
+    for p in raw_products[:5]:
+        name = p.get("title", "Produto")
+        price = p.get("price", "N/A")
+        source = p.get("source", "")
+        rating = p.get("rating", "")
+        rating_str = f" — ⭐ {rating}" if rating else ""
+        product_lines.append(f"- **{name}** — {price} ({source}){rating_str}")
+
+    products_md = "\n".join(product_lines) if product_lines else "Nenhum produto encontrado."
+
+    message = (
+        f"**Análise de Mercado Concluída**\n\n"
+        f"Encontrei **{len(raw_products)} produtos** para *\"{topic}\"*.\n\n"
+        f"**Top 5 produtos:**\n{products_md}\n\n"
+        f"**Recomendação do analista:**\n{recommendations[:300]}"
+    )
 
     return {
         "recommendations": raw_products,
-        "messages": [AIMessage(content=message)]
+        "messages": [AIMessage(content=message, name="portfolio_manager")]
     }
 
 
@@ -57,15 +77,25 @@ def product_manager_node(state):
         human_feedback=human_feedback
     )
 
-    message = f"Proposed Content Plan:\n- Topic: {plan.get('topic')}\n- Angle: {plan.get('angle')}\n- Products: {len(plan.get('key_products', []))}"
-    if critic_feedback:
-        message += f"\n- Addressed Critic Feedback: {critic_feedback}"
+    key_products = plan.get("key_products", [])
+    products_list = "\n".join([f"- {p}" for p in key_products]) if key_products else "Nenhum selecionado"
+
+    message = (
+        f"**Plano de Conteúdo Proposto**\n\n"
+        f"- **Tópico:** {plan.get('topic', topic)}\n"
+        f"- **Ângulo:** {plan.get('angle', 'N/A')}\n"
+        f"- **Público-alvo:** {plan.get('target_audience', 'N/A')}\n"
+        f"- **Produtos selecionados ({len(key_products)}):**\n{products_list}"
+    )
+
+    if critic_feedback and critic_feedback != "approved":
+        message += f"\n\n> ✅ **Feedback do Crítico atendido:** {critic_feedback}"
     if human_feedback:
-        message += f"\n- Addressed Human Feedback: {human_feedback}"
+        message += f"\n\n> ✅ **Feedback Humano atendido:** {human_feedback}"
 
     return {
         "content_plan": plan,
-        "messages": [AIMessage(content=message)]
+        "messages": [AIMessage(content=message, name="product_manager")]
     }
 
 
@@ -75,16 +105,24 @@ def critic_node(state):
     plan = state["content_plan"]
 
     if "Best Value" in plan["angle"] and not state.get("critic_feedback"):
-        feedback = "The angle 'Best Value' is too generic. Please make it more specific to a user persona (e.g., 'Students', 'Pro Gamers')."
-        message = f"Critic Feedback: {feedback}"
+        feedback = "O ângulo 'Best Value' é genérico demais. Torne-o mais específico para um público (ex: 'Estudantes', 'Gamers Profissionais')."
+        message = (
+            f"**Revisão Reprovada**\n\n"
+            f"O plano precisa de ajustes antes de prosseguir.\n\n"
+            f"> ⚠️ {feedback}"
+        )
         return {
             "critic_feedback": feedback,
-            "messages": [AIMessage(content=message)]
+            "messages": [AIMessage(content=message, name="critic")]
         }
     else:
+        message = (
+            "**Revisão Aprovada** ✅\n\n"
+            "O plano atende aos critérios de SEO e potencial de conversão. Aprovado para revisão humana."
+        )
         return {
             "critic_feedback": "approved",
-            "messages": [AIMessage(content="Critic Approved.")]
+            "messages": [AIMessage(content=message, name="critic")]
         }
 
 
@@ -94,8 +132,13 @@ def human_node(state):
     feedback = state.get("human_feedback", "")
     logger.info(f"Human Feedback Processed: {feedback}")
 
+    if feedback.lower().startswith("y"):
+        message = "**Plano aprovado.** Prosseguindo para a geração do artigo."
+    else:
+        message = f"**Plano rejeitado.** Motivo: {feedback}"
+
     return {
-        "messages": [HumanMessage(content=f"Human Feedback: {feedback}")]
+        "messages": [HumanMessage(content=message, name="human")]
     }
 
 
@@ -158,6 +201,6 @@ def writer_node(state):
             rationale=f"Approved by Human. Angle: {state['content_plan'].get('angle')}"
         )
 
-        return {"messages": [AIMessage(content=f"Content published: {article_data.get('title')}")]}
+        return {"messages": [AIMessage(content=f"**Artigo publicado com sucesso!**\n\nTítulo: *{article_data.get('title')}*", name="writer")]}
     else:
-        return {"messages": [AIMessage(content="Failed to generate content.")]}
+        return {"messages": [AIMessage(content="**Erro:** Não foi possível gerar o conteúdo. Verifique os logs para mais detalhes.", name="writer")]}
