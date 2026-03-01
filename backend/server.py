@@ -2,10 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage
-try:
-    from agents.main_graph import app as graph_app
-except ImportError:
-    from main_graph import app as graph_app
+from graph.workflow import app as graph_app
 import uuid
 import threading
 import asyncio
@@ -52,12 +49,8 @@ logging.getLogger("agents").addHandler(memory_handler) # Capture logs from agent
 # Also capture print statements by overriding print (simple hack for this scope)
 # Print override removed to prevent deadlocks
 # We will rely on standard logging or just stdout for now
-try:
-    from agents.memory import MemoryManager
-    from agents.analyst import AnalystAgent
-except ImportError:
-    from memory import MemoryManager
-    from analyst import AnalystAgent
+from services.memory import MemoryManager
+from agents.analyst import AnalystAgent
 
 app = FastAPI()
 
@@ -167,9 +160,9 @@ async def get_memory():
 @app.get("/agent/posts")
 async def get_posts():
     try:
-        # Path resolution similar to main_graph
+        # Path to shared data directory
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        posts_file = os.path.join(current_dir, "..", "frontend", "content", "posts.json")
+        posts_file = os.path.join(current_dir, "..", "data", "posts.json")
         
         if os.path.exists(posts_file):
             with open(posts_file, "r") as f:
@@ -191,7 +184,7 @@ def analyze_portfolio():
         analyst = AnalystAgent()
         # Read current posts
         posts = []
-        posts_file = os.path.join(os.path.dirname(__file__), "..", "frontend", "content", "posts.json")
+        posts_file = os.path.join(os.path.dirname(__file__), "..", "data", "posts.json")
         if os.path.exists(posts_file):
             with open(posts_file, "r") as f:
                 posts = json.load(f)

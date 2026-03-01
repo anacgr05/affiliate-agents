@@ -33,6 +33,7 @@ export type Post = {
 
 export function getPosts(): Post[] {
     const possiblePaths = [
+        path.join(process.cwd(), '..', 'data', 'posts.json'),
         path.join(process.cwd(), 'content', 'posts.json'),
         path.join(process.cwd(), 'frontend', 'content', 'posts.json'),
         path.join(process.cwd(), '..', 'frontend', 'content', 'posts.json'),

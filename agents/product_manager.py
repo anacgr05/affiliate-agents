@@ -12,10 +12,7 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
-try:
-    from agents.memory import MemoryManager
-except ImportError:
-    from memory import MemoryManager
+from services.memory import MemoryManager
 
 class ProductManagerAgent:
     def __init__(self):
@@ -27,18 +24,18 @@ class ProductManagerAgent:
             temperature=0.7
         )
         self.search_api_key = os.getenv("SEARCHAPI_KEY")
-        
+
         self.system_prompt = """
         You are the Product Manager and Lead Content Strategist for a top-tier affiliate marketing site in Brazil.
         Your goal is to take raw product data and market analysis and turn it into a high-converting "Landing Page" style review.
-        
+
         CONTEXT:
         - Current Year: 2026
         - Target Audience: Brazilian Consumers
         - Language: Portuguese (PT-BR)
-        
+
         Instead of a single markdown file, you must output a STRUCTURED JSON object that drives a rich frontend layout.
-        
+
         Your responsibilities:
         1. Create a "Hero" section with a strong headline and subtitle.
         2. Select the top products and create detailed cards for them (Pros, Cons, Verdict).
@@ -46,10 +43,10 @@ class ProductManagerAgent:
         4. Create a "FAQ" section.
         5. IMPORTANT: If you see multiple offers for the SAME product from different stores in the input data, GROUP them into a single product entry and list all the links in the 'affiliate_links' array. This allows for price comparison.
         6. Generate a creative "image_prompt" for the hero section. The style should be "not too realistic, believable, illustrative style". It should depict the essence of the topic without text.
-        
+
         CONSIDER PAST DECISIONS:
         {memory_context}
-        
+
         Input: A topic and a list of recommended products with analysis.
         Output: A JSON object with the following EXACT structure:
         {{
@@ -60,7 +57,7 @@ class ProductManagerAgent:
             "title": "Main Headline",
             "subtitle": "Subheadline",
             "image_prompt": "A creative prompt for an AI image generator...",
-            "image": "https://placehold.co/1200x600?text=Hero+Image" 
+            "image": "https://placehold.co/1200x600?text=Hero+Image"
           }},
           "products": [
             {{
@@ -85,25 +82,25 @@ class ProductManagerAgent:
           ]
         }}
         """
-        
+
         self.prompt = ChatPromptTemplate.from_messages([
             ("system", self.system_prompt),
             ("user", "Topic: {topic}\n\nPortfolio Manager Recommendations: {recommendations}\n\nGenerate the full article content in JSON format.")
         ])
-        
+
         self.chain = self.prompt | self.llm | StrOutputParser()
 
         # --- Plan Generation Chain ---
         self.plan_system_prompt = """
         You are the Product Manager. Create a content plan for a new article.
-        
+
         Topic: {topic}
         Context/Memory: {memory_context}
         Critic Feedback to Address: {critic_feedback}
         Human Feedback to Address: {human_feedback}
-        
+
         Available Products: {products_summary}
-        
+
         Return a JSON object with:
         - "topic": The topic
         - "target_audience": Who is this for?
@@ -111,23 +108,23 @@ class ProductManagerAgent:
         - "angle": The specific angle (e.g., "Best for Students", "2025 Guide").
         - "improvements_made": How you addressed the feedback.
         """
-        
+
         self.plan_prompt = ChatPromptTemplate.from_messages([
             ("system", self.plan_system_prompt),
             ("user", "Create the content plan.")
         ])
-        
+
         self.plan_chain = self.plan_prompt | self.llm | StrOutputParser()
 
     def create_plan(self, topic, recommendations, critic_feedback="", human_feedback=""):
         logger.info(f"📝 Product Manager planning for: {topic}...")
-        
+
         # Retrieve context
         context = self.memory.retrieve_relevant_context(topic)
-        
+
         # Summarize products for the prompt
         products_summary = json.dumps(recommendations[:5], indent=2) if isinstance(recommendations, list) else str(recommendations)
-        
+
         try:
             response = self.plan_chain.invoke({
                 "topic": topic,
@@ -137,7 +134,6 @@ class ProductManagerAgent:
                 "products_summary": products_summary
             })
             cleaned_response = response.replace("```json", "").replace("```", "").strip()
-            return json.loads(cleaned_response)
             return json.loads(cleaned_response)
         except Exception as e:
             logger.error(f"❌ Error generating plan: {e}")
@@ -152,28 +148,28 @@ class ProductManagerAgent:
 
     def create_content(self, topic, recommendations):
         logger.info(f"✍️ Product Manager writing content for: {topic}...")
-        
+
         # Retrieve context
         context = self.memory.retrieve_relevant_context(topic)
-        
+
         try:
             response = self.chain.invoke({
-                "topic": topic, 
+                "topic": topic,
                 "recommendations": recommendations,
                 "memory_context": context
             })
             # Clean up potential markdown code blocks
             cleaned_response = response.replace("```json", "").replace("```", "").strip()
-            
+
             # Attempt to find the first '{' and last '}' to isolate JSON
             import re
             json_match = re.search(r'\{.*\}', cleaned_response, re.DOTALL)
             if json_match:
                 cleaned_response = json_match.group(0)
-            
+
             # Remove potential invalid control characters
             cleaned_response = "".join(c for c in cleaned_response if c >= ' ' or c == '\n' or c == '\r' or c == '\t')
-            
+
             return json.loads(cleaned_response, strict=False)
         except Exception as e:
             logger.error(f"❌ Error generating content: {e}")
@@ -204,26 +200,26 @@ class ProductManagerAgent:
             if response.status_code != 200:
                 logger.error(f"❌ SearchAPI failed: {response.status_code} {response.text}")
                 return []
-                
+
             data = response.json()
             results = data.get("shopping_results", [])
-            
+
             offers = []
             seen_stores = set()
-            
+
             # Prioritize major retailers
             priority_stores = ["Amazon", "Mercado Livre", "Kabum", "Pichau", "Terabyte", "Magalu", "Casas Bahia"]
-            
+
             for item in results:
                 store = item.get("source")
                 if not store:
                     continue
-                    
+
                 # Simple normalization for deduping
                 store_norm = store.lower().replace(" ", "")
                 if store_norm in seen_stores:
                     continue
-                
+
                 # Create offer object
                 offer = {
                     "store": store,
@@ -231,13 +227,13 @@ class ProductManagerAgent:
                     "url": item.get("product_link"),
                     "title": item.get("title") # Optional, for debugging
                 }
-                
+
                 offers.append(offer)
                 seen_stores.add(store_norm)
-                
+
                 if len(offers) >= 5: # Limit to top 5 distinct stores
                     break
-            
+
             return offers
 
         except Exception as e:
