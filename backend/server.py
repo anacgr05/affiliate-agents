@@ -5,24 +5,22 @@ from langchain_core.messages import HumanMessage
 from graph.workflow import app as graph_app
 import uuid
 import threading
-import asyncio
 import os
 import json
 import logging
 import io
 import time
-from contextlib import redirect_stdout
 
 # --- Log Capture Setup ---
 log_stream = io.StringIO()
 logger = logging.getLogger("agent_server")
 logger.setLevel(logging.INFO)
 
-# Custom handler to capture logs to memory
+
 class ListHandler(logging.Handler):
     def __init__(self):
         super().__init__()
-        self.logs = []
+        self.logs: list[str] = []
         self.lock = threading.Lock()
 
     def emit(self, record):
@@ -35,8 +33,9 @@ class ListHandler(logging.Handler):
         except Exception:
             self.handleError(record)
 
+
 memory_handler = ListHandler()
-memory_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+memory_handler.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
 
 logging.getLogger("agent_server").addHandler(memory_handler)
 logging.getLogger("agents").addHandler(memory_handler)
@@ -46,49 +45,57 @@ logging.getLogger("services").addHandler(memory_handler)
 from services.memory import MemoryManager
 from agents.analyst import AnalystAgent
 
+# -- FastAPI App ---------------------------------------------------------------
+
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- Pipeline State Tracking ---
-# This tracks which step of the pipeline we're currently on,
-# so the frontend can show real-time progress even while the graph is running.
+# -- Pipeline State Tracking ---------------------------------------------------
 
 PIPELINE_STEPS = [
-    {"id": "ceo", "label": "CEO definindo estratégia", "emoji": "👔"},
-    {"id": "portfolio", "label": "Gestor de Portfólio pesquisando produtos", "emoji": "💼"},
+    {"id": "ceo",             "label": "CEO definindo estratégia",        "emoji": "👔"},
+    {"id": "portfolio",       "label": "Gestor de Portfólio pesquisando", "emoji": "💼"},
     {"id": "product_manager", "label": "Gestor de Produto criando plano", "emoji": "📝"},
-    {"id": "critic", "label": "Crítico revisando qualidade", "emoji": "🧐"},
-    {"id": "human", "label": "Aguardando aprovação humana", "emoji": "👤"},
-    {"id": "writer", "label": "Redator gerando artigo final", "emoji": "✍️"},
+    {"id": "critic",          "label": "Crítico revisando qualidade",     "emoji": "��"},
+    {"id": "human",           "label": "Aguardando aprovação humana",     "emoji": "👤"},
+    {"id": "writer",          "label": "Redator gerando artigo final",    "emoji": "✍️"},
 ]
 
 pipeline_state = {
     "is_running": False,
-    "current_step": None,      # e.g. "ceo", "portfolio", etc.
-    "steps_completed": [],      # list of step ids already done
+    "current_step": None,
+    "steps_completed": [],
     "started_at": None,
     "error": None,
 }
 pipeline_lock = threading.Lock()
 
+# Serialize all graph_app access so background threads and request handlers
+# never collide on the checkpoint DB.
+graph_lock = threading.Lock()
 
-def update_pipeline(step_id: str | None = None, running: bool = True, error: str | None = None, completed_step: str | None = None):
+
+def update_pipeline(
+    step_id: str | None = None,
+    running: bool = True,
+    error: str | None = None,
+    completed_step: str | None = None,
+):
     with pipeline_lock:
         pipeline_state["is_running"] = running
         if step_id is not None:
             pipeline_state["current_step"] = step_id
         if error is not None:
             pipeline_state["error"] = error
-        if completed_step:
-            if completed_step not in pipeline_state["steps_completed"]:
-                pipeline_state["steps_completed"].append(completed_step)
+        if completed_step and completed_step not in pipeline_state["steps_completed"]:
+            pipeline_state["steps_completed"].append(completed_step)
 
 
 def reset_pipeline():
@@ -100,7 +107,8 @@ def reset_pipeline():
         pipeline_state["error"] = None
 
 
-# Store thread_id for the current session
+# -- Session State -------------------------------------------------------------
+
 current_thread_id = str(uuid.uuid4())
 config = {"configurable": {"thread_id": current_thread_id}}
 
@@ -108,35 +116,47 @@ config = {"configurable": {"thread_id": current_thread_id}}
 class StartRequest(BaseModel):
     topic: str
 
+
 class FeedbackRequest(BaseModel):
     approved: bool
     comments: str = ""
 
 
+# -- Background Graph Runner ---------------------------------------------------
+
 def _run_graph_in_background(initial_state, run_config):
     """Run the LangGraph pipeline in a background thread, tracking each step."""
     try:
-        for event in graph_app.stream(initial_state, config=run_config):
-            # event is a dict like {"ceo": {...}}, {"portfolio": {...}}, etc.
-            for node_name in event:
-                update_pipeline(completed_step=node_name)
-                # Predict what's next based on the graph flow
-                step_order = [s["id"] for s in PIPELINE_STEPS]
-                current_idx = step_order.index(node_name) if node_name in step_order else -1
-                if current_idx + 1 < len(step_order):
-                    next_step = step_order[current_idx + 1]
-                    update_pipeline(step_id=next_step)
+        with graph_lock:
+            for event in graph_app.stream(initial_state, config=run_config):
+                for node_name in event:
+                    update_pipeline(completed_step=node_name)
+                    step_order = [s["id"] for s in PIPELINE_STEPS]
+                    idx = step_order.index(node_name) if node_name in step_order else -1
+                    if idx + 1 < len(step_order):
+                        update_pipeline(step_id=step_order[idx + 1])
 
-        # Check if we stopped at human interrupt
-        state_snapshot = graph_app.get_state(run_config)
-        if state_snapshot.next and "human" in state_snapshot.next:
+        with graph_lock:
+            snapshot = graph_app.get_state(run_config)
+        if snapshot.next and "human" in snapshot.next:
             update_pipeline(step_id="human", running=True)
         else:
             update_pipeline(running=False)
 
     except Exception as e:
-        logger.error(f"❌ Erro no pipeline: {e}")
+        logger.error(f"Erro no pipeline: {e}")
         update_pipeline(running=False, error=str(e))
+
+
+# -- Endpoints -----------------------------------------------------------------
+#
+# KEY DESIGN:
+# Endpoints that touch graph_app or MemoryManager are plain `def` (sync).
+# FastAPI runs sync `def` in an external thread-pool automatically,
+# so they NEVER block the async event loop.  This prevents
+# "socket hang up / ECONNRESET" errors from the Next.js proxy.
+#
+# Only truly lightweight endpoints (pipeline, logs) are `async def`.
 
 
 @app.post("/agent/start")
@@ -150,17 +170,15 @@ def start_agent(req: StartRequest):
         "current_topic": req.topic,
         "recommendations": [],
         "content_plan": {},
-        "human_feedback": ""
+        "human_feedback": "",
     }
 
-    # Reset and start pipeline tracking
     reset_pipeline()
     with pipeline_lock:
         pipeline_state["is_running"] = True
         pipeline_state["started_at"] = time.time()
         pipeline_state["current_step"] = "ceo"
 
-    # Run in background thread so the API stays responsive
     thread = threading.Thread(
         target=_run_graph_in_background,
         args=(initial_state, config),
@@ -172,9 +190,11 @@ def start_agent(req: StartRequest):
 
 
 @app.get("/agent/status")
-async def get_status():
+def get_status():
+    """Sync def -> FastAPI runs in thread-pool automatically."""
     try:
-        state_snapshot = graph_app.get_state(config)
+        with graph_lock:
+            state_snapshot = graph_app.get_state(config)
         current_state = state_snapshot.values
         next_step = state_snapshot.next
 
@@ -189,7 +209,6 @@ async def get_status():
                 for m in current_state["messages"]
             ]
 
-        # Determine status from both graph state and pipeline tracker
         with pipeline_lock:
             is_running = pipeline_state["is_running"]
 
@@ -199,18 +218,14 @@ async def get_status():
         elif is_running:
             status = "PROCESSING"
 
-        return {
-            "status": status,
-            "messages": messages,
-            "plan": current_state.get("content_plan", {})
-        }
+        return {"status": status, "messages": messages, "plan": current_state.get("content_plan", {})}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
 
 @app.get("/agent/pipeline")
 async def get_pipeline():
-    """Returns the current pipeline progress for real-time UI updates."""
+    """Lightweight -- no blocking I/O, safe as async."""
     with pipeline_lock:
         elapsed = None
         if pipeline_state["started_at"]:
@@ -228,14 +243,18 @@ async def get_pipeline():
 
 @app.post("/agent/feedback")
 def submit_feedback(req: FeedbackRequest):
+    """Sync def -> runs in thread-pool, won't block event loop."""
     feedback_str = "y" if req.approved else f"n. {req.comments}"
 
-    graph_app.update_state(config, {"human_feedback": feedback_str})
+    with graph_lock:
+        graph_app.update_state(config, {"human_feedback": feedback_str})
 
-    # Mark human as completed, predict next step
-    update_pipeline(step_id="writer" if req.approved else "product_manager", running=True, completed_step="human")
+    update_pipeline(
+        step_id="writer" if req.approved else "product_manager",
+        running=True,
+        completed_step="human",
+    )
 
-    # Resume in background thread
     thread = threading.Thread(
         target=_run_graph_in_background,
         args=(None, config),
@@ -247,7 +266,8 @@ def submit_feedback(req: FeedbackRequest):
 
 
 @app.get("/agent/memory")
-async def get_memory():
+def get_memory():
+    """Sync def -> runs in thread-pool (ChromaDB is blocking)."""
     try:
         mem = MemoryManager()
         context = mem.retrieve_relevant_context("feedback decision rationale", k=5)
@@ -257,29 +277,29 @@ async def get_memory():
 
 
 @app.get("/agent/posts")
-async def get_posts():
+def get_posts():
     try:
         current_dir = os.path.dirname(os.path.abspath(__file__))
         posts_file = os.path.join(current_dir, "..", "data", "posts.json")
-
         if os.path.exists(posts_file):
             with open(posts_file, "r") as f:
                 posts = json.load(f)
             return {"posts": posts}
-        else:
-            return {"posts": []}
+        return {"posts": []}
     except Exception as e:
         return {"posts": [], "error": str(e)}
 
 
 @app.get("/agent/logs")
 async def get_logs():
+    """Lightweight -- just reads from memory list."""
     with memory_handler.lock:
         return {"logs": list(memory_handler.logs)}
 
 
 @app.post("/agent/analyze")
 def analyze_portfolio():
+    """Sync def -> runs in thread-pool (LLM call is blocking)."""
     try:
         analyst = AnalystAgent()
         posts = []
@@ -287,9 +307,7 @@ def analyze_portfolio():
         if os.path.exists(posts_file):
             with open(posts_file, "r") as f:
                 posts = json.load(f)
-
-        recommendations = analyst.analyze_portfolio(posts)
-        return recommendations
+        return analyst.analyze_portfolio(posts)
     except Exception as e:
         return {"error": str(e)}
 
