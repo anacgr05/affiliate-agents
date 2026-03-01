@@ -1,12 +1,73 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage
-from agents.main_graph import app as graph_app
+try:
+    from agents.main_graph import app as graph_app
+except ImportError:
+    from main_graph import app as graph_app
 import uuid
 import threading
 import asyncio
+import os
+import json
+import logging
+import io
+from contextlib import redirect_stdout
+
+# --- Log Capture Setup ---
+log_stream = io.StringIO()
+# Configure logging to write to both stderr (console) and our stream
+# Configure logging to write to both stderr (console) and our stream
+# logging.basicConfig(level=logging.INFO) # Removing this as Uvicorn handles it
+logger = logging.getLogger("agent_server")
+logger.setLevel(logging.INFO)
+
+# Custom handler to capture logs to memory
+class ListHandler(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.logs = []
+        self.lock = threading.Lock()
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            with self.lock:
+                self.logs.append(msg)
+                if len(self.logs) > 100: # Keep last 100 logs
+                    self.logs.pop(0)
+        except Exception:
+            self.handleError(record)
+
+memory_handler = ListHandler()
+memory_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+
+# Attach to specific loggers instead of root to avoid conflicts
+# logging.getLogger("uvicorn").addHandler(memory_handler) # Removed to prevent conflicts
+# logging.getLogger("uvicorn.access").addHandler(memory_handler) # Removed to prevent conflicts
+logging.getLogger("agent_server").addHandler(memory_handler)
+logging.getLogger("agents").addHandler(memory_handler) # Capture logs from agents package
+
+# Also capture print statements by overriding print (simple hack for this scope)
+# Print override removed to prevent deadlocks
+# We will rely on standard logging or just stdout for now
+try:
+    from agents.memory import MemoryManager
+    from agents.analyst import AnalystAgent
+except ImportError:
+    from memory import MemoryManager
+    from analyst import AnalystAgent
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Store thread_id for the current session (simplification for single user)
 current_thread_id = str(uuid.uuid4())
@@ -20,7 +81,7 @@ class FeedbackRequest(BaseModel):
     comments: str = ""
 
 @app.post("/agent/start")
-async def start_agent(req: StartRequest):
+def start_agent(req: StartRequest):
     global current_thread_id, config
     current_thread_id = str(uuid.uuid4()) # New session
     config = {"configurable": {"thread_id": current_thread_id}}
@@ -72,7 +133,7 @@ async def get_status():
         return {"status": "error", "message": str(e)}
 
 @app.post("/agent/feedback")
-async def submit_feedback(req: FeedbackRequest):
+def submit_feedback(req: FeedbackRequest):
     feedback_str = "y" if req.approved else f"n. {req.comments}"
     
     # Update state with feedback
@@ -86,6 +147,59 @@ async def submit_feedback(req: FeedbackRequest):
         return {"status": "resumed"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+@app.get("/agent/memory")
+async def get_memory():
+    try:
+        mem = MemoryManager()
+        # Retrieve all or recent memories. 
+        # For now, let's just search for a generic term or get the last few if possible.
+        # The current MemoryManager only has retrieve_relevant_context.
+        # Let's assume we want to see everything relevant to "product".
+        # Or better, we can add a method to MemoryManager to get recent items, 
+        # but for now let's query broadly.
+        # Retrieve relevant context. Using a broad query to get recent general feedback.
+        context = mem.retrieve_relevant_context("feedback decision rationale", k=5)
+        return {"memory": context}
+    except Exception as e:
+        return {"memory": f"Error accessing memory: {str(e)}"}
+
+@app.get("/agent/posts")
+async def get_posts():
+    try:
+        # Path resolution similar to main_graph
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        posts_file = os.path.join(current_dir, "..", "frontend", "content", "posts.json")
+        
+        if os.path.exists(posts_file):
+            with open(posts_file, "r") as f:
+                posts = json.load(f)
+            return {"posts": posts}
+        else:
+            return {"posts": []}
+    except Exception as e:
+        return {"posts": [], "error": str(e)}
+
+@app.get("/agent/logs")
+async def get_logs():
+    with memory_handler.lock:
+        return {"logs": list(memory_handler.logs)}
+
+@app.post("/agent/analyze")
+def analyze_portfolio():
+    try:
+        analyst = AnalystAgent()
+        # Read current posts
+        posts = []
+        posts_file = os.path.join(os.path.dirname(__file__), "..", "frontend", "content", "posts.json")
+        if os.path.exists(posts_file):
+            with open(posts_file, "r") as f:
+                posts = json.load(f)
+        
+        recommendations = analyst.analyze_portfolio(posts)
+        return recommendations
+    except Exception as e:
+        return {"error": str(e)}
 
 if __name__ == "__main__":
     import uvicorn
