@@ -105,7 +105,7 @@ export default function Dashboard() {
 
     const fetchStatus = useCallback(async () => {
         try {
-            const res = await fetch('http://localhost:8000/agent/status');
+            const res = await fetch('/api/agent/status');
             const data = await res.json();
             setLogs(data.messages || []);
             setStatus(data.status);
@@ -120,7 +120,7 @@ export default function Dashboard() {
 
     const fetchPipeline = useCallback(async () => {
         try {
-            const res = await fetch('http://localhost:8000/agent/pipeline');
+            const res = await fetch('/api/agent/pipeline');
             const data = await res.json();
             setPipeline(data);
             if (!data.is_running) {
@@ -134,9 +134,9 @@ export default function Dashboard() {
     const fetchExtras = useCallback(async () => {
         try {
             const [memRes, postsRes, logsRes] = await Promise.all([
-                fetch('http://localhost:8000/agent/memory'),
-                fetch('http://localhost:8000/agent/posts'),
-                fetch('http://localhost:8000/agent/logs'),
+                fetch('/api/agent/memory'),
+                fetch('/api/agent/posts'),
+                fetch('/api/agent/logs'),
             ]);
             const memData = await memRes.json();
             const postsData = await postsRes.json();
@@ -176,7 +176,7 @@ export default function Dashboard() {
         setStatus("PROCESSING");
         setPipeline(null);  // Reset pipeline display
         try {
-            await fetch('http://localhost:8000/agent/start', {
+            await fetch('/api/agent/start', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ topic }),
@@ -194,7 +194,7 @@ export default function Dashboard() {
     const runAnalysis = async () => {
         setIsAnalyzing(true);
         try {
-            const res = await fetch('http://localhost:8000/agent/analyze', { method: 'POST' });
+            const res = await fetch('/api/agent/analyze', { method: 'POST' });
             const data = await res.json();
             setRecommendations(data.recommendations || []);
         } catch (e) {
@@ -204,7 +204,7 @@ export default function Dashboard() {
     };
 
     const sendFeedback = async (approved: boolean) => {
-        await fetch('http://localhost:8000/agent/feedback', {
+        await fetch('/api/agent/feedback', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ approved, comments: comment }),
