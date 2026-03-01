@@ -6,12 +6,30 @@ from dotenv import load_dotenv
 
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langgraph.graph import StateGraph, END
+from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Import existing agents
-from portfolio_manager import PortfolioManagerAgent
-from product_manager import ProductManagerAgent
-from memory import MemoryManager
+try:
+    from agents.portfolio_manager import PortfolioManagerAgent
+    from agents.product_manager import ProductManagerAgent
+    from agents.memory import MemoryManager
+except ImportError:
+    from portfolio_manager import PortfolioManagerAgent
+    from product_manager import ProductManagerAgent
+    from product_manager import ProductManagerAgent
+    from memory import MemoryManager
+
+try:
+    from backend.image_gen import generate_hero_image
+except ImportError:
+    # Fallback if running from a different context
+    import sys
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from backend.image_gen import generate_hero_image
 
 # Load environment variables
 load_dotenv()
@@ -29,7 +47,7 @@ class AgentState(TypedDict):
 
 def ceo_node(state: AgentState):
     """The CEO decides the strategy or delegates."""
-    print("\n👔 CEO: Assessing strategy...")
+    logger.info("👔 CEO: Assessing strategy...")
     # For now, simple pass-through to Portfolio, but could use LLM to decide topic
     topic = state.get("current_topic")
     message = f"Strategic Directive: Analyze market for '{topic}' and identify high-potential products."
@@ -39,7 +57,7 @@ def ceo_node(state: AgentState):
 
 def portfolio_node(state: AgentState):
     """Portfolio Manager searches and analyzes products."""
-    print("\n💼 Portfolio Manager: Searching for products...")
+    logger.info("💼 Portfolio Manager: Searching for products...")
     topic = state["current_topic"]
     
     pm_agent = PortfolioManagerAgent()
@@ -62,7 +80,7 @@ def portfolio_node(state: AgentState):
 
 def product_manager_node(state: AgentState):
     """Product Manager creates a content plan."""
-    print("\n📝 Product Manager: Creating content plan...")
+    logger.info("📝 Product Manager: Creating content plan...")
     topic = state["current_topic"]
     recommendations = state["recommendations"]
     
@@ -91,7 +109,7 @@ def product_manager_node(state: AgentState):
 
 def critic_node(state: AgentState):
     """Critic reviews the plan for SEO and Conversion quality."""
-    print("\n🧐 Critic: Reviewing plan...")
+    logger.info("🧐 Critic: Reviewing plan...")
     plan = state["content_plan"]
     
     # Simple mock logic for the critic (in real life, use an LLM call here)
@@ -113,12 +131,11 @@ def critic_node(state: AgentState):
 
 def human_node(state: AgentState):
     """Human review node.
-    In API mode, this node runs AFTER the user has provided feedback via the API.
     The feedback should already be injected into the state.
     """
-    print("\n👤 Human Node Running...")
+    logger.info("👤 Human Node Running...")
     feedback = state.get("human_feedback", "")
-    print(f"Human Feedback Processed: {feedback}")
+    logger.info(f"Human Feedback Processed: {feedback}")
     
     return {
         "messages": [HumanMessage(content=f"Human Feedback: {feedback}")]
@@ -126,7 +143,7 @@ def human_node(state: AgentState):
 
 def writer_node(state: AgentState):
     """Generates the final content."""
-    print("\n✍️ Writer: Generating full article...")
+    logger.info("✍️ Writer: Generating full article...")
     topic = state["current_topic"]
     # We pass the raw products to the PM agent to write the full thing
     # Re-using the ProductManagerAgent's create_content method
@@ -142,8 +159,35 @@ def writer_node(state: AgentState):
     article_data = pm_agent.create_content(topic, products_summary)
     
     if article_data:
+        # --- PRICE ENRICHMENT ---
+        if "products" in article_data:
+            logger.info("💰 Enriching product data with real-time prices...")
+            for product in article_data["products"]:
+                product_name = product.get("name")
+                if product_name:
+                    offers = pm_agent.find_product_offers(product_name)
+                    if offers:
+                        product["affiliate_links"] = offers
+                        # Update display price to the first (usually best match) offer's price
+                        if offers[0].get("price"):
+                            product["price"] = offers[0]["price"]
+                        logger.info(f"✅ Enriched {product_name} with {len(offers)} offers.")
+                    else:
+                        logger.warning(f"⚠️ No offers found for {product_name}")
+
+        # --- IMAGE GENERATION ---
+        if "hero" in article_data and "image_prompt" in article_data["hero"]:
+            prompt = article_data["hero"]["image_prompt"]
+            image_url = generate_hero_image(prompt)
+            article_data["hero"]["image"] = image_url
+            logger.info(f"🖼️ Image attached to article: {image_url}")
+            
         # Save to file
-        output_dir = "../frontend/content"
+        # Save to file
+        # Determine path relative to this script file to be safe
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        # Go up one level to root, then into frontend/content
+        output_dir = os.path.join(current_dir, "..", "frontend", "content")
         os.makedirs(output_dir, exist_ok=True)
         posts_file = os.path.join(output_dir, "posts.json")
         
@@ -238,4 +282,7 @@ def log_conversation(messages):
 # --- Main Execution (CLI Legacy Support) ---
 if __name__ == "__main__":
     # This block is for testing via CLI if needed, but the API will use 'app' directly
-    pass
+    print("⚠️  This script is part of the Backend API.")
+    print("To run the Agent System, please start the server:")
+    print("   uvicorn backend.server:app --reload")
+    print("\nThen access the Dashboard at: http://localhost:3000/admin/dashboard")
