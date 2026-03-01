@@ -1,11 +1,12 @@
 langchain
 langchain-community
 langchain-openai
+langchain-chroma
+langchain-huggingface
+langgraph
 python-dotenv
 requests
-langgraph
 chromadb
-langchain-chroma
 sentence-transformers
 fastapi
 uvicorn

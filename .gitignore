@@ -2,16 +2,41 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+*.egg-info/
+dist/
+build/
 venv/
+.venv/
+
+# Environment
 .env
+.env.local
 
 # Node
 node_modules/
 .next/
-dist/
-build/
+
+# Database
+memory_db/
+*.sqlite3
+
+# Logs
+logs/
+*.log
+
+# Debug / Temp
+debug_response.json
+frontend/debug-paths.js
+*.tmp
+*.bak
 
 # OS
 .DS_Store
-debug_response.json
-frontend/debug-paths.js
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

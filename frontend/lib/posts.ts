@@ -64,8 +64,3 @@ export function getPosts(): Post[] {
         return [];
     }
 }
-
-export function getPostBySlug(slug: string): Post | undefined {
-    const posts = getPosts();
-    return posts.find((post) => post.slug === slug);
-}
