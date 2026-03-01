@@ -5,10 +5,23 @@ from langchain_core.documents import Document
 
 
 class MemoryManager:
+    """Singleton — the HuggingFace model is loaded once and reused."""
+
+    _instance = None
+
+    def __new__(cls, persist_directory="./memory_db"):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+
     def __init__(self, persist_directory="./memory_db"):
+        if self._initialized:
+            return
+        self._initialized = True
         self.persist_directory = persist_directory
 
-        # Use a lightweight, high-quality local embedding model
+        # Load the embedding model once
         self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
         self.vector_store = Chroma(

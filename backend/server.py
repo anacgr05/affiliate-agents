@@ -77,9 +77,33 @@ pipeline_state = {
 }
 pipeline_lock = threading.Lock()
 
-# Serialize all graph_app access so background threads and request handlers
-# never collide on the checkpoint DB.
-graph_lock = threading.Lock()
+
+# -- Cached state from last completed run (updated by background thread) ------
+# This avoids calling graph_app.get_state() while the graph is streaming,
+# which would deadlock with graph_lock or block for minutes.
+_last_state_cache = {
+    "messages": [],
+    "plan": {},
+    "next": (),
+}
+_state_cache_lock = threading.Lock()
+
+
+def _update_state_cache(state_snapshot):
+    """Cache the graph state for fast reads from get_status."""
+    with _state_cache_lock:
+        current = state_snapshot.values
+        _last_state_cache["next"] = state_snapshot.next or ()
+        _last_state_cache["plan"] = current.get("content_plan", {})
+        if "messages" in current:
+            _last_state_cache["messages"] = [
+                {
+                    "role": m.type,
+                    "name": getattr(m, "name", None) or m.type,
+                    "content": m.content,
+                }
+                for m in current["messages"]
+            ]
 
 
 def update_pipeline(
@@ -127,17 +151,26 @@ class FeedbackRequest(BaseModel):
 def _run_graph_in_background(initial_state, run_config):
     """Run the LangGraph pipeline in a background thread, tracking each step."""
     try:
-        with graph_lock:
-            for event in graph_app.stream(initial_state, config=run_config):
-                for node_name in event:
-                    update_pipeline(completed_step=node_name)
-                    step_order = [s["id"] for s in PIPELINE_STEPS]
-                    idx = step_order.index(node_name) if node_name in step_order else -1
-                    if idx + 1 < len(step_order):
-                        update_pipeline(step_id=step_order[idx + 1])
+        # stream() is long-running — do NOT hold a lock during it
+        for event in graph_app.stream(initial_state, config=run_config):
+            for node_name in event:
+                update_pipeline(completed_step=node_name)
+                step_order = [s["id"] for s in PIPELINE_STEPS]
+                idx = step_order.index(node_name) if node_name in step_order else -1
+                if idx + 1 < len(step_order):
+                    update_pipeline(step_id=step_order[idx + 1])
 
-        with graph_lock:
-            snapshot = graph_app.get_state(run_config)
+            # Update cached state after each node so get_status can read it
+            try:
+                snapshot = graph_app.get_state(run_config)
+                _update_state_cache(snapshot)
+            except Exception:
+                pass  # non-critical
+
+        # Final state after stream completes
+        snapshot = graph_app.get_state(run_config)
+        _update_state_cache(snapshot)
+
         if snapshot.next and "human" in snapshot.next:
             update_pipeline(step_id="human", running=True)
         else:
@@ -190,27 +223,16 @@ def start_agent(req: StartRequest):
 
 
 @app.get("/agent/status")
-def get_status():
-    """Sync def -> FastAPI runs in thread-pool automatically."""
+async def get_status():
+    """Returns status from cached state — never blocks on graph_app."""
     try:
-        with graph_lock:
-            state_snapshot = graph_app.get_state(config)
-        current_state = state_snapshot.values
-        next_step = state_snapshot.next
-
-        messages = []
-        if "messages" in current_state:
-            messages = [
-                {
-                    "role": m.type,
-                    "name": getattr(m, "name", None) or m.type,
-                    "content": m.content,
-                }
-                for m in current_state["messages"]
-            ]
-
         with pipeline_lock:
             is_running = pipeline_state["is_running"]
+
+        with _state_cache_lock:
+            messages = list(_last_state_cache["messages"])
+            plan = dict(_last_state_cache["plan"]) if _last_state_cache["plan"] else {}
+            next_step = _last_state_cache["next"]
 
         status = "IDLE"
         if next_step and "human" in next_step:
@@ -218,7 +240,7 @@ def get_status():
         elif is_running:
             status = "PROCESSING"
 
-        return {"status": status, "messages": messages, "plan": current_state.get("content_plan", {})}
+        return {"status": status, "messages": messages, "plan": plan}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -243,11 +265,10 @@ async def get_pipeline():
 
 @app.post("/agent/feedback")
 def submit_feedback(req: FeedbackRequest):
-    """Sync def -> runs in thread-pool, won't block event loop."""
+    """Sync def → runs in thread-pool, won't block event loop."""
     feedback_str = "y" if req.approved else f"n. {req.comments}"
 
-    with graph_lock:
-        graph_app.update_state(config, {"human_feedback": feedback_str})
+    graph_app.update_state(config, {"human_feedback": feedback_str})
 
     update_pipeline(
         step_id="writer" if req.approved else "product_manager",
