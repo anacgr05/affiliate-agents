@@ -1,26 +1,28 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage
 from graph.workflow import app as graph_app
 import uuid
 import threading
+import traceback
 import os
 import json
 import logging
-import io
 import time
 
 # --- Log Capture Setup ---
-log_stream = io.StringIO()
 logger = logging.getLogger("agent_server")
 logger.setLevel(logging.INFO)
 
 
 class ListHandler(logging.Handler):
-    def __init__(self):
+    """Thread-safe handler that keeps the last N log messages in memory."""
+
+    def __init__(self, max_entries: int = 300):
         super().__init__()
         self.logs: list[str] = []
+        self._max = max_entries
         self.lock = threading.Lock()
 
     def emit(self, record):
@@ -28,8 +30,8 @@ class ListHandler(logging.Handler):
             msg = self.format(record)
             with self.lock:
                 self.logs.append(msg)
-                if len(self.logs) > 200:
-                    self.logs.pop(0)
+                if len(self.logs) > self._max:
+                    self.logs = self.logs[-self._max:]
         except Exception:
             self.handleError(record)
 
@@ -37,15 +39,15 @@ class ListHandler(logging.Handler):
 memory_handler = ListHandler()
 memory_handler.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
 
-logging.getLogger("agent_server").addHandler(memory_handler)
-logging.getLogger("agents").addHandler(memory_handler)
-logging.getLogger("graph").addHandler(memory_handler)
-logging.getLogger("services").addHandler(memory_handler)
+for _name in ("agent_server", "agents", "graph", "services"):
+    logging.getLogger(_name).addHandler(memory_handler)
 
-from services.memory import MemoryManager
 from agents.analyst import AnalystAgent
 
-# -- FastAPI App ---------------------------------------------------------------
+# Prevent HuggingFace tokenizers from spawning extra threads (reduces GIL contention)
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+# -- FastAPI App --------------------------------------------------
 
 app = FastAPI()
 
@@ -60,13 +62,14 @@ app.add_middleware(
 # -- Pipeline State Tracking ---------------------------------------------------
 
 PIPELINE_STEPS = [
-    {"id": "ceo",             "label": "CEO definindo estratégia",        "emoji": "👔"},
-    {"id": "portfolio",       "label": "Gestor de Portfólio pesquisando", "emoji": "💼"},
-    {"id": "product_manager", "label": "Gestor de Produto criando plano", "emoji": "📝"},
-    {"id": "critic",          "label": "Crítico revisando qualidade",     "emoji": "��"},
-    {"id": "human",           "label": "Aguardando aprovação humana",     "emoji": "👤"},
-    {"id": "writer",          "label": "Redator gerando artigo final",    "emoji": "✍️"},
+    {"id": "ceo",             "label": "CEO",        "emoji": "👔"},
+    {"id": "portfolio",       "label": "Portfólio",  "emoji": "💼"},
+    {"id": "product_manager", "label": "Produto",    "emoji": "📝"},
+    {"id": "critic",          "label": "Crítico",    "emoji": "🧐"},
+    {"id": "human",           "label": "Aprovação",  "emoji": "👤"},
+    {"id": "writer",          "label": "Redator",    "emoji": "✍️"},
 ]
+_STEP_ORDER = [s["id"] for s in PIPELINE_STEPS]
 
 pipeline_state = {
     "is_running": False,
@@ -78,9 +81,8 @@ pipeline_state = {
 pipeline_lock = threading.Lock()
 
 
-# -- Cached state from last completed run (updated by background thread) ------
-# This avoids calling graph_app.get_state() while the graph is streaming,
-# which would deadlock with graph_lock or block for minutes.
+# -- Cached state (updated by background thread; read by polling endpoints) ----
+
 _last_state_cache = {
     "messages": [],
     "plan": {},
@@ -90,20 +92,23 @@ _state_cache_lock = threading.Lock()
 
 
 def _update_state_cache(state_snapshot):
-    """Cache the graph state for fast reads from get_status."""
-    with _state_cache_lock:
-        current = state_snapshot.values
-        _last_state_cache["next"] = state_snapshot.next or ()
-        _last_state_cache["plan"] = current.get("content_plan", {})
-        if "messages" in current:
-            _last_state_cache["messages"] = [
-                {
-                    "role": m.type,
-                    "name": getattr(m, "name", None) or m.type,
-                    "content": m.content,
-                }
-                for m in current["messages"]
-            ]
+    """Safely cache the graph state for fast reads from get_status."""
+    try:
+        with _state_cache_lock:
+            current = state_snapshot.values
+            _last_state_cache["next"] = state_snapshot.next or ()
+            _last_state_cache["plan"] = current.get("content_plan", {})
+            if "messages" in current:
+                _last_state_cache["messages"] = [
+                    {
+                        "role": m.type,
+                        "name": getattr(m, "name", None) or m.type,
+                        "content": m.content,
+                    }
+                    for m in current["messages"]
+                ]
+    except Exception as exc:
+        logger.warning(f"_update_state_cache falhou: {exc}")
 
 
 def update_pipeline(
@@ -146,55 +151,86 @@ class FeedbackRequest(BaseModel):
     comments: str = ""
 
 
-# -- Background Graph Runner ---------------------------------------------------
+# -- Background Graph Runner (FULLY SYNCHRONOUS — runs in its own thread) ------
 
 def _run_graph_in_background(initial_state, run_config):
-    """Run the LangGraph pipeline in a background thread, tracking each step."""
+    """Run the LangGraph pipeline in a dedicated thread.
+
+    This function is fully synchronous — no asyncio, no event loop interaction.
+    All state updates use threading.Lock which is safe from a background thread.
+    """
     try:
-        # stream() is long-running — do NOT hold a lock during it
+        logger.info("▶️  Background task started")
+
+        # Stream the graph (blocking, synchronous)
         for event in graph_app.stream(initial_state, config=run_config):
             for node_name in event:
+                logger.info(f"✅ Node concluído: {node_name}")
                 update_pipeline(completed_step=node_name)
-                step_order = [s["id"] for s in PIPELINE_STEPS]
-                idx = step_order.index(node_name) if node_name in step_order else -1
-                if idx + 1 < len(step_order):
-                    update_pipeline(step_id=step_order[idx + 1])
 
-            # Update cached state after each node so get_status can read it
+                idx = _STEP_ORDER.index(node_name) if node_name in _STEP_ORDER else -1
+                if idx + 1 < len(_STEP_ORDER):
+                    update_pipeline(step_id=_STEP_ORDER[idx + 1])
+
+            # Update cached state after each node
             try:
                 snapshot = graph_app.get_state(run_config)
                 _update_state_cache(snapshot)
-            except Exception:
-                pass  # non-critical
+            except Exception as e:
+                logger.warning(f"Erro ao atualizar state cache: {e}")
 
-        # Final state after stream completes
-        snapshot = graph_app.get_state(run_config)
-        _update_state_cache(snapshot)
+        # ---- stream() finished normally ----
+        logger.info("🏁 Stream concluído normalmente")
+        try:
+            snapshot = graph_app.get_state(run_config)
+            _update_state_cache(snapshot)
+        except Exception:
+            pass
 
         if snapshot.next and "human" in snapshot.next:
             update_pipeline(step_id="human", running=True)
         else:
             update_pipeline(running=False)
+            logger.info("🎉 Pipeline finalizado com sucesso!")
 
     except Exception as e:
-        logger.error(f"Erro no pipeline: {e}")
+        tb = traceback.format_exc()
+        logger.error(f"💥 Erro FATAL no pipeline: {e}\n{tb}")
         update_pipeline(running=False, error=str(e))
+
+    finally:
+        # SAFETY NET
+        with pipeline_lock:
+            if pipeline_state["is_running"]:
+                if not pipeline_state["error"]:
+                    pipeline_state["error"] = "Pipeline encerrado inesperadamente."
+                pipeline_state["is_running"] = False
+                logger.warning("⚠️  Safety-net: pipeline forçado a parar")
 
 
 # -- Endpoints -----------------------------------------------------------------
 #
-# KEY DESIGN:
-# Endpoints that touch graph_app or MemoryManager are plain `def` (sync).
-# FastAPI runs sync `def` in an external thread-pool automatically,
-# so they NEVER block the async event loop.  This prevents
-# "socket hang up / ECONNRESET" errors from the Next.js proxy.
-#
-# Only truly lightweight endpoints (pipeline, logs) are `async def`.
+# DESIGN:
+# - start_agent / submit_feedback: async def → response sent directly on event
+#   loop, no threadpool handoff. The heavy graph work starts in a daemon thread
+#   after a 2s delay (Timer), so the response is sent before any GIL contention.
+# - get_status / get_pipeline / get_logs / get_posts: plain def → FastAPI runs
+#   them in its thread pool. These use threading.Lock which would block the event
+#   loop if they were async def.
+# - get_memory / analyze_portfolio: plain def → blocking I/O (ChromaDB, LLM).
 
 
 @app.post("/agent/start")
 def start_agent(req: StartRequest):
+    """Sync def — runs in FastAPI's thread pool.
+
+    Timer(2s) delays the heavy graph work so the HTTP response is fully
+    sent before any GIL-heavy computation begins.
+    """
     global current_thread_id, config
+
+    logger.info(f"🚀 Received start request for: {req.topic}")
+
     current_thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": current_thread_id}}
 
@@ -212,22 +248,20 @@ def start_agent(req: StartRequest):
         pipeline_state["started_at"] = time.time()
         pipeline_state["current_step"] = "ceo"
 
-    thread = threading.Thread(
-        target=_run_graph_in_background,
-        args=(initial_state, config),
-        daemon=True,
-    )
-    thread.start()
+    timer = threading.Timer(2.0, _run_graph_in_background, args=(initial_state, config))
+    timer.daemon = True
+    timer.start()
 
     return {"status": "started", "thread_id": current_thread_id}
 
 
 @app.get("/agent/status")
-async def get_status():
-    """Returns status from cached state — never blocks on graph_app."""
+def get_status():
+    """Returns cached state — never touches graph_app. Sync def because it uses threading.Lock."""
     try:
         with pipeline_lock:
             is_running = pipeline_state["is_running"]
+            error = pipeline_state["error"]
 
         with _state_cache_lock:
             messages = list(_last_state_cache["messages"])
@@ -235,7 +269,9 @@ async def get_status():
             next_step = _last_state_cache["next"]
 
         status = "IDLE"
-        if next_step and "human" in next_step:
+        if error and not is_running:
+            status = "IDLE"
+        elif next_step and "human" in next_step:
             status = "WAITING_FOR_APPROVAL"
         elif is_running:
             status = "PROCESSING"
@@ -246,8 +282,8 @@ async def get_status():
 
 
 @app.get("/agent/pipeline")
-async def get_pipeline():
-    """Lightweight -- no blocking I/O, safe as async."""
+def get_pipeline():
+    """Sync def — uses threading.Lock."""
     with pipeline_lock:
         elapsed = None
         if pipeline_state["started_at"]:
@@ -265,10 +301,11 @@ async def get_pipeline():
 
 @app.post("/agent/feedback")
 def submit_feedback(req: FeedbackRequest):
-    """Sync def → runs in thread-pool, won't block event loop."""
+    """Sync def — graph_app.update_state is blocking, runs in thread pool."""
     feedback_str = "y" if req.approved else f"n. {req.comments}"
 
     graph_app.update_state(config, {"human_feedback": feedback_str})
+    logger.info(f"📨 Feedback recebido: {feedback_str}")
 
     update_pipeline(
         step_id="writer" if req.approved else "product_manager",
@@ -276,20 +313,20 @@ def submit_feedback(req: FeedbackRequest):
         completed_step="human",
     )
 
-    thread = threading.Thread(
-        target=_run_graph_in_background,
-        args=(None, config),
-        daemon=True,
-    )
-    thread.start()
+    timer = threading.Timer(2.0, _run_graph_in_background, args=(None, config))
+    timer.daemon = True
+    timer.start()
 
     return {"status": "resumed"}
 
 
+# -- Memory/RAG (disabled by default — see services/memory.py) ----------------
+
 @app.get("/agent/memory")
 def get_memory():
-    """Sync def -> runs in thread-pool (ChromaDB is blocking)."""
+    """Memory/RAG — returns empty when ENABLE_MEMORY=0 (default)."""
     try:
+        from services.memory import MemoryManager
         mem = MemoryManager()
         context = mem.retrieve_relevant_context("feedback decision rationale", k=5)
         return {"memory": context}
@@ -299,9 +336,9 @@ def get_memory():
 
 @app.get("/agent/posts")
 def get_posts():
+    """Sync def — file I/O runs in thread pool."""
     try:
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        posts_file = os.path.join(current_dir, "..", "data", "posts.json")
+        posts_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "posts.json")
         if os.path.exists(posts_file):
             with open(posts_file, "r") as f:
                 posts = json.load(f)
@@ -312,15 +349,15 @@ def get_posts():
 
 
 @app.get("/agent/logs")
-async def get_logs():
-    """Lightweight -- just reads from memory list."""
+def get_logs():
+    """Sync def — uses threading.Lock."""
     with memory_handler.lock:
         return {"logs": list(memory_handler.logs)}
 
 
 @app.post("/agent/analyze")
 def analyze_portfolio():
-    """Sync def -> runs in thread-pool (LLM call is blocking)."""
+    """Run portfolio analysis (sync — runs in FastAPI thread pool)."""
     try:
         analyst = AnalystAgent()
         posts = []
@@ -330,7 +367,8 @@ def analyze_portfolio():
                 posts = json.load(f)
         return analyst.analyze_portfolio(posts)
     except Exception as e:
-        return {"error": str(e)}
+        logger.error(f"❌ Analyze endpoint failed: {e}")
+        return {"error": str(e), "recommendations": []}
 
 
 if __name__ == "__main__":
