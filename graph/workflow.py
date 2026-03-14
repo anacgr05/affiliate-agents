@@ -24,6 +24,7 @@ class AgentState(TypedDict):
     content_plan: dict
     critic_feedback: str
     human_feedback: str
+    ceo_strategy: str  # CEO's editorial strategy directive for downstream agents
 
 
 # --- Routing Logic ---

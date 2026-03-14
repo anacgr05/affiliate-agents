@@ -21,6 +21,9 @@ node_modules/
 memory_db/
 *.sqlite3
 
+# Generated Data (outputs from pipeline)
+data/posts.json
+
 # Logs
 logs/
 *.log

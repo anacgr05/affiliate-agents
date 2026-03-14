@@ -4,24 +4,41 @@ import logging
 
 from langchain_core.messages import AIMessage, HumanMessage
 
+from agents.ceo import CEOAgent
+from agents.critic import CriticAgent
 from agents.portfolio_manager import PortfolioManagerAgent
 from agents.product_manager import ProductManagerAgent
 from services.memory import MemoryManager
-from services.image_gen import generate_hero_image
+
+try:
+    from services.image_gen import generate_hero_image
+except Exception:
+    generate_hero_image = None
 
 logger = logging.getLogger(__name__)
 
 
 def ceo_node(state):
-    """The CEO decides the strategy or delegates."""
-    logger.info("👔 CEO: Assessing strategy...")
+    """CEO defines the editorial strategy before the pipeline executes."""
     topic = state.get("current_topic")
-    message = (
-        f"**Diretiva Estratégica**\n\n"
-        f"Analisar o mercado para **'{topic}'** e identificar os produtos com maior potencial de conversão."
-    )
+
+    existing_posts = []
+    try:
+        posts_file = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "posts.json"
+        )
+        if os.path.exists(posts_file):
+            with open(posts_file, "r", encoding="utf-8") as f:
+                existing_posts = json.load(f)
+    except Exception as e:
+        logger.warning(f"⚠️ CEO could not load existing posts: {e}")
+
+    ceo = CEOAgent()
+    strategy = ceo.define_strategy(topic, existing_posts)
+
     return {
-        "messages": [AIMessage(content=message, name="ceo")]
+        "ceo_strategy": strategy,
+        "messages": [AIMessage(content=f"**Diretiva Estratégica do CEO**\n\n{strategy}", name="ceo")],
     }
 
 
@@ -74,7 +91,8 @@ def product_manager_node(state):
         topic=topic,
         recommendations=recommendations,
         critic_feedback=critic_feedback,
-        human_feedback=human_feedback
+        human_feedback=human_feedback,
+        ceo_strategy=state.get("ceo_strategy", ""),
     )
 
     key_products = plan.get("key_products", [])
@@ -100,29 +118,41 @@ def product_manager_node(state):
 
 
 def critic_node(state):
-    """Critic reviews the plan for SEO and Conversion quality."""
-    logger.info("🧐 Critic: Reviewing plan...")
+    """Critic reviews the plan for SEO and conversion quality using CriticAgent."""
     plan = state["content_plan"]
+    ceo_strategy = state.get("ceo_strategy", "")
 
-    if "Best Value" in plan["angle"] and not state.get("critic_feedback"):
-        feedback = "O ângulo 'Best Value' é genérico demais. Torne-o mais específico para um público (ex: 'Estudantes', 'Gamers Profissionais')."
-        message = (
-            f"**Revisão Reprovada**\n\n"
-            f"O plano precisa de ajustes antes de prosseguir.\n\n"
-            f"> ⚠️ {feedback}"
-        )
-        return {
-            "critic_feedback": feedback,
-            "messages": [AIMessage(content=message, name="critic")]
-        }
-    else:
-        message = (
-            "**Revisão Aprovada** ✅\n\n"
-            "O plano atende aos critérios de SEO e potencial de conversão. Aprovado para revisão humana."
-        )
+    memory_context = ""
+    try:
+        mem = MemoryManager()
+        memory_context = mem.retrieve_relevant_context(plan.get("topic", ""), k=5)
+    except Exception as e:
+        logger.warning(f"⚠️ Critic could not load memory context: {e}")
+
+    critic = CriticAgent()
+    result = critic.review_plan(plan, memory_context=memory_context, ceo_strategy=ceo_strategy)
+
+    score = result.get("score", "?")
+    summary = result.get("summary", "")
+
+    if result.get("approved"):
+        suggestions = result.get("suggestions", [])
+        suggestions_md = ("\n\n**Sugestões:**\n" + "\n".join(f"- {s}" for s in suggestions)) if suggestions else ""
+        message = f"**Revisão Aprovada** ✅ (Score: {score}/10)\n\n{summary}{suggestions_md}"
         return {
             "critic_feedback": "approved",
-            "messages": [AIMessage(content=message, name="critic")]
+            "messages": [AIMessage(content=message, name="critic")],
+        }
+    else:
+        issues = result.get("issues", [])
+        recs = result.get("recommendations", [])
+        issues_md = ("\n\n**Problemas:**\n" + "\n".join(f"- {i}" for i in issues)) if issues else ""
+        recs_md = ("\n\n**Recomendações:**\n" + "\n".join(f"- {r}" for r in recs)) if recs else ""
+        feedback = f"{summary}. " + "; ".join(issues) + (" — " + "; ".join(recs) if recs else "")
+        message = f"**Revisão Reprovada** ❌ (Score: {score}/10)\n\n{summary}{issues_md}{recs_md}"
+        return {
+            "critic_feedback": feedback,
+            "messages": [AIMessage(content=message, name="critic")],
         }
 
 
@@ -147,32 +177,42 @@ def writer_node(state):
     logger.info("✍️ Writer: Generating full article...")
     topic = state["current_topic"]
 
-    pm_agent = ProductManagerAgent()
-    products_summary = json.dumps(state["recommendations"][:5])
-    article_data = pm_agent.create_content(topic, products_summary)
+    try:
+        pm_agent = ProductManagerAgent()
+        products_summary = json.dumps(state["recommendations"][:5])
+        article_data = pm_agent.create_content(topic, products_summary)
 
-    if article_data:
+        if not article_data:
+            logger.error("❌ ProductManager returned None - content generation failed")
+            return {"messages": [AIMessage(content="**Erro:** Não foi possível gerar o conteúdo. Verifique os logs para mais detalhes.", name="writer")]}
+
         # --- PRICE ENRICHMENT ---
         if "products" in article_data:
             logger.info("💰 Enriching product data with real-time prices...")
             for product in article_data["products"]:
                 product_name = product.get("name")
                 if product_name:
-                    offers = pm_agent.find_product_offers(product_name)
-                    if offers:
-                        product["affiliate_links"] = offers
-                        if offers[0].get("price"):
-                            product["price"] = offers[0]["price"]
-                        logger.info(f"✅ Enriched {product_name} with {len(offers)} offers.")
-                    else:
-                        logger.warning(f"⚠️ No offers found for {product_name}")
+                    try:
+                        offers = pm_agent.find_product_offers(product_name)
+                        if offers:
+                            product["affiliate_links"] = offers
+                            if offers[0].get("price"):
+                                product["price"] = offers[0]["price"]
+                            logger.info(f"✅ Enriched {product_name} with {len(offers)} offers.")
+                        else:
+                            logger.warning(f"⚠️ No offers found for {product_name}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to enrich {product_name}: {e}")
 
         # --- IMAGE GENERATION ---
+        # TEMPORARIAMENTE DESABILITADO - focando na geração do artigo
+        # TODO: Re-habilitar quando resolver timeout da API de imagem
         if "hero" in article_data and "image_prompt" in article_data["hero"]:
-            prompt = article_data["hero"]["image_prompt"]
-            image_url = generate_hero_image(prompt)
-            article_data["hero"]["image"] = image_url
-            logger.info(f"🖼️ Image attached to article: {image_url}")
+            # prompt = article_data["hero"]["image_prompt"]
+            # image_url = generate_hero_image(prompt)
+            # article_data["hero"]["image"] = image_url
+            article_data["hero"]["image"] = "https://placehold.co/1200x600?text=Hero+Image"
+            logger.info(f"🖼️ Using placeholder image (generation disabled)")
 
         # --- SAVE TO FILE ---
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -185,22 +225,45 @@ def writer_node(state):
             with open(posts_file, "r") as f:
                 try:
                     posts = json.load(f)
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to load existing posts: {e}")
                     posts = []
 
         posts.append(article_data)
-        with open(posts_file, "w") as f:
-            json.dump(posts, f, indent=2)
+        with open(posts_file, "w", encoding="utf-8") as f:
+            json.dump(posts, f, indent=2, ensure_ascii=False)
+
+        logger.info(f"✅ Article saved to {posts_file}")
 
         # --- SAVE TO MEMORY ---
-        mem = MemoryManager()
-        mem.add_decision(
-            topic=topic,
-            decision=f"Published article: {article_data.get('title')}",
-            agent_role="Product Manager",
-            rationale=f"Approved by Human. Angle: {state['content_plan'].get('angle')}"
-        )
+        try:
+            mem = MemoryManager()
+            mem.add_decision(
+                topic=topic,
+                decision=f"Published article: {article_data.get('title')}",
+                agent_role="Product Manager",
+                rationale=f"Approved by Human. Angle: {state['content_plan'].get('angle')}"
+            )
+            logger.info("✅ Decision saved to memory")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to save to memory: {e}")
 
-        return {"messages": [AIMessage(content=f"**Artigo publicado com sucesso!**\n\nTítulo: *{article_data.get('title')}*", name="writer")]}
-    else:
-        return {"messages": [AIMessage(content="**Erro:** Não foi possível gerar o conteúdo. Verifique os logs para mais detalhes.", name="writer")]}
+        return {
+            "messages": [
+                AIMessage(
+                    content=f"**Artigo publicado com sucesso!**\n\nTítulo: *{article_data.get('title')}*\n\nSlug: `{article_data.get('slug')}`",
+                    name="writer"
+                )
+            ]
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Writer node failed: {e}", exc_info=True)
+        return {
+            "messages": [
+                AIMessage(
+                    content=f"**Erro crítico no Writer:** {str(e)}\n\nVerifique os logs do backend para mais detalhes.",
+                    name="writer"
+                )
+            ]
+        }
