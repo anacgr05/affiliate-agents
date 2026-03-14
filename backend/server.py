@@ -181,13 +181,14 @@ def _run_graph_in_background(initial_state, run_config):
 
         # ---- stream() finished normally ----
         logger.info("🏁 Stream concluído normalmente")
+        snapshot = None
         try:
             snapshot = graph_app.get_state(run_config)
             _update_state_cache(snapshot)
         except Exception:
             pass
 
-        if snapshot.next and "human" in snapshot.next:
+        if snapshot and snapshot.next and "human" in snapshot.next:
             update_pipeline(step_id="human", running=True)
         else:
             update_pipeline(running=False)
@@ -211,9 +212,9 @@ def _run_graph_in_background(initial_state, run_config):
 # -- Endpoints -----------------------------------------------------------------
 #
 # DESIGN:
-# - start_agent / submit_feedback: async def → response sent directly on event
-#   loop, no threadpool handoff. The heavy graph work starts in a daemon thread
-#   after a 2s delay (Timer), so the response is sent before any GIL contention.
+# - start_agent / submit_feedback: plain def → FastAPI runs in thread pool.
+#   Heavy graph work starts in a daemon thread after a 2s Timer delay, so the
+#   HTTP response is flushed before any GIL-heavy computation begins.
 # - get_status / get_pipeline / get_logs / get_posts: plain def → FastAPI runs
 #   them in its thread pool. These use threading.Lock which would block the event
 #   loop if they were async def.

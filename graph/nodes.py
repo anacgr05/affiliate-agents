@@ -6,7 +6,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from agents.portfolio_manager import PortfolioManagerAgent
 from agents.product_manager import ProductManagerAgent
-from services.image_gen import generate_hero_image
+GENERATE_IMAGES = os.getenv("GENERATE_IMAGES", "0") == "1"
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +167,8 @@ def writer_node(state):
                         logger.warning(f"⚠️ No offers found for {product_name}")
 
         # --- IMAGE GENERATION ---
-        if "hero" in article_data and "image_prompt" in article_data["hero"]:
+        if GENERATE_IMAGES and "hero" in article_data and "image_prompt" in article_data["hero"]:
+            from services.image_gen import generate_hero_image
             prompt = article_data["hero"]["image_prompt"]
             image_url = generate_hero_image(prompt)
             article_data["hero"]["image"] = image_url
