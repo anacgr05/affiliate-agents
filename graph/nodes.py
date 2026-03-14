@@ -6,8 +6,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from agents.portfolio_manager import PortfolioManagerAgent
 from agents.product_manager import ProductManagerAgent
-from services.memory import MemoryManager
-from services.image_gen import generate_hero_image
+GENERATE_IMAGES = os.getenv("GENERATE_IMAGES", "0") == "1"
 
 logger = logging.getLogger(__name__)
 
@@ -168,7 +167,8 @@ def writer_node(state):
                         logger.warning(f"⚠️ No offers found for {product_name}")
 
         # --- IMAGE GENERATION ---
-        if "hero" in article_data and "image_prompt" in article_data["hero"]:
+        if GENERATE_IMAGES and "hero" in article_data and "image_prompt" in article_data["hero"]:
+            from services.image_gen import generate_hero_image
             prompt = article_data["hero"]["image_prompt"]
             image_url = generate_hero_image(prompt)
             article_data["hero"]["image"] = image_url
@@ -193,13 +193,17 @@ def writer_node(state):
             json.dump(posts, f, indent=2)
 
         # --- SAVE TO MEMORY ---
-        mem = MemoryManager()
-        mem.add_decision(
-            topic=topic,
-            decision=f"Published article: {article_data.get('title')}",
-            agent_role="Product Manager",
-            rationale=f"Approved by Human. Angle: {state['content_plan'].get('angle')}"
-        )
+        try:
+            from services.memory import MemoryManager
+            mem = MemoryManager()
+            mem.add_decision(
+                topic=topic,
+                decision=f"Published article: {article_data.get('title')}",
+                agent_role="Product Manager",
+                rationale=f"Approved by Human. Angle: {state['content_plan'].get('angle')}",
+            )
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to save to memory: {e}")
 
         return {"messages": [AIMessage(content=f"**Artigo publicado com sucesso!**\n\nTítulo: *{article_data.get('title')}*", name="writer")]}
     else:
