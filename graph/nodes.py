@@ -132,43 +132,63 @@ def critic_node(state):
     critic = CriticAgent()
     result = critic.review_plan(plan, memory_context=memory_context, ceo_strategy=ceo_strategy)
 
-    score = result.get("score", 0)
-    summary = result.get("summary", "")
+    # Sub-score line shown in every message (approved or not)
+    scores_line = (
+        f"SEO: **{result.seo_score}** · "
+        f"CRO: **{result.cro_score}** · "
+        f"Diferenciação: **{result.differentiation_score}** · "
+        f"CEO: **{result.ceo_alignment_score}**"
+    )
 
-    # Enforce score > 8 programmatically — don't trust LLM-level "approved" alone.
-    llm_approved = result.get("approved", False)
-    actually_approved = llm_approved and float(score) > 8.0
-
-    if actually_approved:
-        suggestions = result.get("suggestions", [])
-        suggestions_md = ("\n\n**Sugestões:**\n" + "\n".join(f"- {s}" for s in suggestions)) if suggestions else ""
-        message = f"**Revisão Aprovada** ✅ (Score: {score}/10)\n\n{summary}{suggestions_md}"
+    if result.approved:
+        suggestions_md = (
+            "\n\n**Sugestões:**\n" + "\n".join(f"- {s}" for s in result.suggestions)
+        ) if result.suggestions else ""
+        message = (
+            f"**Revisão Aprovada** ✅ (Score: {result.overall_score}/10)\n\n"
+            f"{result.summary}\n\n"
+            f"*{scores_line}*"
+            f"{suggestions_md}"
+        )
         return {
             "critic_feedback": "approved",
             "messages": [AIMessage(content=message, name="critic")],
         }
     else:
-        issues = result.get("issues", [])
-        recs = result.get("recommendations", [])
         attempts = state.get("critic_attempts", 0) + 1
 
-        # Rich feedback for product_manager: score + issues + recs + CEO alignment reminder
-        score_note = f"Score atual: {score}/10 (mínimo necessário: > 8.0)."
-        if llm_approved and float(score) <= 8.0:
-            # LLM approved but score not high enough — make this explicit
-            issues = issues or [f"Score {score}/10 não atinge o mínimo de 8.0 para aprovação automática."]
-            recs = recs or ["Reforce o ângulo de diferenciação, especificidade do público e potencial de conversão."]
+        # Build dimension-level feedback string for product_manager_node
+        dim_lines = []
+        if result.seo_issues:
+            dim_lines.append(f"SEO ({result.seo_score}/10): " + "; ".join(result.seo_issues))
+        if result.cro_issues:
+            dim_lines.append(f"CRO ({result.cro_score}/10): " + "; ".join(result.cro_issues))
+        if result.differentiation_issues:
+            dim_lines.append(f"Diferenciação ({result.differentiation_score}/10): " + "; ".join(result.differentiation_issues))
+        if result.ceo_alignment_issues:
+            dim_lines.append(f"CEO ({result.ceo_alignment_score}/10): " + "; ".join(result.ceo_alignment_issues))
 
-        feedback_parts = [score_note, summary]
-        if issues:
-            feedback_parts.append("Problemas: " + "; ".join(issues))
-        if recs:
-            feedback_parts.append("Recomendações: " + "; ".join(recs))
-        feedback = " | ".join(feedback_parts)
+        feedback_parts = [f"Score: {result.overall_score}/10 (mínimo > 8.0)", result.summary]
+        if dim_lines:
+            feedback_parts.append("Por dimensão: " + " | ".join(dim_lines))
+        if result.recommendations:
+            feedback_parts.append("Recomendações: " + "; ".join(result.recommendations))
+        feedback = " || ".join(feedback_parts)
 
-        issues_md = ("\n\n**Problemas:**\n" + "\n".join(f"- {i}" for i in issues)) if issues else ""
-        recs_md = ("\n\n**Recomendações:**\n" + "\n".join(f"- {r}" for r in recs)) if recs else ""
-        message = f"**Revisão Reprovada** ❌ (Score: {score}/10 — mínimo > 8.0)\n\n{summary}{issues_md}{recs_md}"
+        # Markdown for dashboard
+        all_issues = result.seo_issues + result.cro_issues + result.differentiation_issues + result.ceo_alignment_issues
+        issues_md = (
+            "\n\n**Problemas por dimensão:**\n" + "\n".join(f"- {i}" for i in all_issues)
+        ) if all_issues else ""
+        recs_md = (
+            "\n\n**Recomendações para o Product Manager:**\n" + "\n".join(f"- {r}" for r in result.recommendations)
+        ) if result.recommendations else ""
+        message = (
+            f"**Revisão Reprovada** ❌ (Score: {result.overall_score}/10 — mínimo > 8.0)\n\n"
+            f"{result.summary}\n\n"
+            f"*{scores_line}*"
+            f"{issues_md}{recs_md}"
+        )
         return {
             "critic_feedback": feedback,
             "critic_attempts": attempts,
