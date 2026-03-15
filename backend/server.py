@@ -1,59 +1,97 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+"""
+Affiliate-Agents — Backend API
+
+Streaming pattern:
+  POST /agent/start        → creates run, returns run_id immediately
+  GET  /agent/runs/{id}/stream → SSE: replays history + live node events
+  POST /agent/feedback     → injects human feedback, unblocks pipeline
+
+Pipeline execution uses graph.astream() directly — no manual thread bridges.
+LangGraph handles sync nodes via its own run_in_executor internally.
+Human-in-the-loop pause uses asyncio.Event (no polling, no WebSocket).
+"""
+
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage
 from graph.workflow import app as graph_app
 import asyncio
 import uuid
-import threading
-import traceback
-import os
 import json
 import logging
 import time
-from typing import Set
+import os
+import traceback
+import threading
 
-# --- Log Capture Setup ---
-logger = logging.getLogger("agent_server")
-logger.setLevel(logging.INFO)
+# ---------------------------------------------------------------------------
+# Logging — in-memory ring buffer exposed via GET /agent/logs
+# ---------------------------------------------------------------------------
 
-
-class ListHandler(logging.Handler):
-    """Thread-safe handler that keeps the last N log messages in memory."""
-
+class _RingHandler(logging.Handler):
     def __init__(self, max_entries: int = 300):
         super().__init__()
-        self.logs: list[str] = []
+        self._buf: list[str] = []
+        self._lock = threading.Lock()
         self._max = max_entries
-        self.lock = threading.Lock()
 
     def emit(self, record):
         try:
-            msg = self.format(record)
-            with self.lock:
-                self.logs.append(msg)
-                if len(self.logs) > self._max:
-                    self.logs = self.logs[-self._max:]
+            with self._lock:
+                self._buf.append(self.format(record))
+                if len(self._buf) > self._max:
+                    self._buf = self._buf[-self._max:]
         except Exception:
             self.handleError(record)
 
+    @property
+    def entries(self) -> list[str]:
+        with self._lock:
+            return list(self._buf)
 
-memory_handler = ListHandler()
-memory_handler.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
+
+_ring = _RingHandler()
+_ring.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
 
 for _name in ("agent_server", "agents", "graph", "services"):
-    logging.getLogger(_name).addHandler(memory_handler)
+    _log = logging.getLogger(_name)
+    _log.setLevel(logging.INFO)
+    _log.addHandler(_ring)
 
-from services.memory import MemoryManager
-from agents.analyst import AnalystAgent
+logger = logging.getLogger("agent_server")
 
-# Prevent HuggingFace tokenizers from spawning extra threads (reduces GIL contention)
+# ---------------------------------------------------------------------------
+# Late imports (after log setup so their loggers inherit the handler)
+# ---------------------------------------------------------------------------
+
+from services.memory import MemoryManager  # noqa: E402
+from agents.analyst import AnalystAgent    # noqa: E402
+
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-# -- FastAPI App with lifespan --------------------------------------------------
+# ---------------------------------------------------------------------------
+# Startup — preload HuggingFace model before accepting requests
+#
+# MemoryManager loads 'all-MiniLM-L6-v2' on first instantiation.
+# That load holds the Python GIL for 10-30 s, freezing the event loop
+# mid-request. Doing it here, in a thread, avoids that entirely.
+# ---------------------------------------------------------------------------
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    logger.info("⏳ Preloading ChromaDB / HuggingFace embeddings…")
+    try:
+        await asyncio.to_thread(MemoryManager)
+        logger.info("✅ MemoryManager ready.")
+    except Exception as exc:
+        logger.warning(f"⚠️  MemoryManager preload failed (continuing): {exc}")
+    yield
 
+
+app = FastAPI(lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -62,130 +100,170 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -- WebSocket Connection Manager -----------------------------------------------
+# ---------------------------------------------------------------------------
+# Run store
+#
+# Each run:
+#   events   – buffered SSE events (replayed on reconnect/refresh)
+#   queues   – one asyncio.Queue per active SSE subscriber
+#   done     – True once the pipeline ended (success or error)
+#   feedback – asyncio.Event; .set() by POST /agent/feedback to resume
+#   config   – LangGraph {"configurable": {"thread_id": run_id}}
+# ---------------------------------------------------------------------------
 
-class ConnectionManager:
-    """Manages WebSocket connections and broadcasts events to all connected clients."""
-
-    def __init__(self):
-        self.active_connections: Set[WebSocket] = set()
-        self.lock = asyncio.Lock()
-
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        async with self.lock:
-            self.active_connections.add(websocket)
-        logger.info(f"🔌 WebSocket conectado. Total: {len(self.active_connections)}")
-
-    async def disconnect(self, websocket: WebSocket):
-        async with self.lock:
-            self.active_connections.discard(websocket)
-        logger.info(f"🔌 WebSocket desconectado. Total: {len(self.active_connections)}")
-
-    async def broadcast(self, message: dict):
-        """Broadcast message to all connected clients."""
-        if not self.active_connections:
-            return
-
-        disconnected = set()
-        async with self.lock:
-            connections = list(self.active_connections)
-
-        for connection in connections:
-            try:
-                await connection.send_json(message)
-            except Exception as e:
-                logger.warning(f"Erro ao enviar para WebSocket: {e}")
-                disconnected.add(connection)
-
-        if disconnected:
-            async with self.lock:
-                self.active_connections -= disconnected
-
-manager = ConnectionManager()
-
-# -- Pipeline State Tracking ---------------------------------------------------
-
-PIPELINE_STEPS = [
-    {"id": "ceo",             "label": "CEO",        "emoji": "👔"},
-    {"id": "portfolio",       "label": "Portfólio",  "emoji": "💼"},
-    {"id": "product_manager", "label": "Produto",    "emoji": "📝"},
-    {"id": "critic",          "label": "Crítico",    "emoji": "🧐"},
-    {"id": "human",           "label": "Aprovação",  "emoji": "👤"},
-    {"id": "writer",          "label": "Redator",    "emoji": "✍️"},
-]
-_STEP_ORDER = [s["id"] for s in PIPELINE_STEPS]
-
-pipeline_state = {
-    "is_running": False,
-    "current_step": None,
-    "steps_completed": [],
-    "started_at": None,
-    "error": None,
-}
-pipeline_lock = threading.Lock()
+_runs: dict[str, dict] = {}
+_current_run_id: str | None = None  # latest run (for feedback routing)
 
 
-# -- Cached state (updated by background thread; read by polling endpoints) ----
+def _new_run(run_id: str) -> dict:
+    run = {
+        "events":   [],
+        "queues":   set(),
+        "done":     False,
+        "feedback": asyncio.Event(),
+        "config":   {"configurable": {"thread_id": run_id}},
+    }
+    _runs[run_id] = run
+    return run
 
-_last_state_cache = {
-    "messages": [],
-    "plan": {},
-    "next": (),
-}
-_state_cache_lock = threading.Lock()
+
+async def _emit(run_id: str, event: dict | None) -> None:
+    """Append event to history and push to all active SSE queues.
+    None signals end-of-stream (closes subscriber connections)."""
+    run = _runs.get(run_id)
+    if not run:
+        return
+    if event is not None:
+        run["events"].append(event)
+    else:
+        run["done"] = True
+    for q in list(run["queues"]):
+        await q.put(event)
 
 
-def _update_state_cache(state_snapshot):
-    """Safely cache the graph state for fast reads from get_status."""
+def _messages_from(node_output: dict) -> list[dict]:
+    return [
+        {
+            "role":    m.type,
+            "name":    getattr(m, "name", None) or m.type,
+            "content": m.content,
+        }
+        for m in node_output.get("messages", [])
+    ]
+
+
+async def _stream_phase(run_id: str, state_or_none, config: dict) -> None:
+    """Run one phase of the graph and emit node_completed events.
+
+    LangGraph's astream() runs sync nodes in the default thread-pool
+    executor — no manual bridging needed. Each chunk arrives as soon
+    as its node finishes.
+    """
+    async for chunk in graph_app.astream(state_or_none, config=config):
+        for node_name, node_output in chunk.items():
+            # LangGraph emits internal bookkeeping nodes (e.g. __interrupt__)
+            # whose values are tuples, not state dicts — skip them.
+            if node_name.startswith("__") or not isinstance(node_output, dict):
+                continue
+            logger.info(f"✅ Node completed: {node_name}")
+            await _emit(run_id, {
+                "type":     "node_completed",
+                "node":     node_name,
+                "messages": _messages_from(node_output),
+                "plan":     node_output.get("content_plan") or {},
+            })
+
+
+async def _run_pipeline(run_id: str, initial_state: dict) -> None:
+    """Full pipeline lifecycle.
+
+    Phase 1: stream until LangGraph interrupt (before 'human' node).
+    Pause:   emit waiting_approval, block on asyncio.Event.
+    Phase 2: after feedback, resume and stream to completion.
+    """
+    run = _runs[run_id]
+    config = run["config"]
     try:
-        with _state_cache_lock:
-            current = state_snapshot.values
-            _last_state_cache["next"] = state_snapshot.next or ()
-            _last_state_cache["plan"] = current.get("content_plan", {})
-            if "messages" in current:
-                _last_state_cache["messages"] = [
-                    {
-                        "role": m.type,
-                        "name": getattr(m, "name", None) or m.type,
-                        "content": m.content,
-                    }
-                    for m in current["messages"]
-                ]
+        logger.info(f"▶️  Pipeline started — run_id={run_id}")
+        await _emit(run_id, {
+            "type":  "pipeline_started",
+            "topic": initial_state.get("current_topic", ""),
+        })
+
+        # Phase 1 ─────────────────────────────────────────────────────
+        await _stream_phase(run_id, initial_state, config)
+
+        snapshot = await graph_app.aget_state(config)
+        if snapshot.next and "human" in snapshot.next:
+            logger.info("⏸️  Waiting for human feedback…")
+            await _emit(run_id, {"type": "waiting_approval"})
+            await run["feedback"].wait()   # released by POST /agent/feedback
+
+            # Phase 2 ─────────────────────────────────────────────────
+            await _stream_phase(run_id, None, config)
+
+        await _emit(run_id, {"type": "pipeline_completed"})
+        logger.info("🎉 Pipeline completed successfully!")
+
     except Exception as exc:
-        logger.warning(f"_update_state_cache falhou: {exc}")
+        logger.error(f"💥 Pipeline error: {exc}\n{traceback.format_exc()}")
+        await _emit(run_id, {"type": "error", "message": str(exc)})
+
+    finally:
+        await _emit(run_id, None)   # sentinel → closes all SSE connections
 
 
-def update_pipeline(
-    step_id: str | None = None,
-    running: bool = True,
-    error: str | None = None,
-    completed_step: str | None = None,
-):
-    with pipeline_lock:
-        pipeline_state["is_running"] = running
-        if step_id is not None:
-            pipeline_state["current_step"] = step_id
-        if error is not None:
-            pipeline_state["error"] = error
-        if completed_step and completed_step not in pipeline_state["steps_completed"]:
-            pipeline_state["steps_completed"].append(completed_step)
+# ---------------------------------------------------------------------------
+# SSE endpoint
+# ---------------------------------------------------------------------------
+
+@app.get("/agent/runs/{run_id}/stream")
+async def stream_run(run_id: str, request: Request):
+    """Server-Sent Events stream for one pipeline run.
+
+    Replays buffered history first so page-refresh / reconnect works
+    without losing events. Then streams live events from the queue.
+    Keepalive comments sent every 25 s to prevent proxy timeouts.
+    """
+    run = _runs.setdefault(run_id, {
+        "events": [], "queues": set(), "done": False,
+        "feedback": asyncio.Event(),
+        "config":   {"configurable": {"thread_id": run_id}},
+    })
+    queue: asyncio.Queue = asyncio.Queue()
+    run["queues"].add(queue)
+
+    async def generate():
+        for evt in list(run["events"]):
+            yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
+        if run["done"]:
+            return
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=25.0)
+                    if event is None:
+                        break
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            run["queues"].discard(queue)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
-def reset_pipeline():
-    with pipeline_lock:
-        pipeline_state["is_running"] = False
-        pipeline_state["current_step"] = None
-        pipeline_state["steps_completed"] = []
-        pipeline_state["started_at"] = None
-        pipeline_state["error"] = None
-
-
-# -- Session State -------------------------------------------------------------
-
-current_thread_id = str(uuid.uuid4())
-config = {"configurable": {"thread_id": current_thread_id}}
-
+# ---------------------------------------------------------------------------
+# Pipeline endpoints
+# ---------------------------------------------------------------------------
 
 class StartRequest(BaseModel):
     topic: str
@@ -196,267 +274,107 @@ class FeedbackRequest(BaseModel):
     comments: str = ""
 
 
-# -- Background Graph Runner ---------------------------------------------------
-
-async def _run_graph_in_background(initial_state, run_config):
-    """Run the LangGraph pipeline and stream events via WebSocket."""
-    try:
-        logger.info("▶️  Background task started")
-        await manager.broadcast({"type": "pipeline_started", "topic": initial_state["current_topic"]})
-
-        # Run the blocking graph.stream() in a thread pool
-        def _sync_stream():
-            events = []
-            for event in graph_app.stream(initial_state, config=run_config):
-                events.append(event)
-            return events
-
-        events = await asyncio.to_thread(_sync_stream)
-
-        for event in events:
-            for node_name in event:
-                logger.info(f"✅ Node concluído: {node_name}")
-                update_pipeline(completed_step=node_name)
-
-                # Broadcast node completion
-                await manager.broadcast({
-                    "type": "node_completed",
-                    "node": node_name,
-                    "timestamp": time.time()
-                })
-
-                idx = _STEP_ORDER.index(node_name) if node_name in _STEP_ORDER else -1
-                if idx + 1 < len(_STEP_ORDER):
-                    update_pipeline(step_id=_STEP_ORDER[idx + 1])
-
-            # Update cached state after each node
-            try:
-                snapshot = await asyncio.to_thread(graph_app.get_state, run_config)
-                _update_state_cache(snapshot)
-
-                # Broadcast state update
-                await manager.broadcast({
-                    "type": "state_update",
-                    "messages": [{"content": m.content, "name": getattr(m, 'name', 'system')}
-                                for m in snapshot.values.get("messages", [])],
-                    "plan": snapshot.values.get("content_plan", {}),
-                    "next": list(snapshot.next) if snapshot.next else []
-                })
-            except Exception as e:
-                logger.warning(f"Erro ao atualizar state cache: {e}")
-
-        # ---- stream() finished normally ----
-        logger.info("🏁 Stream concluído normalmente")
-        snapshot = await asyncio.to_thread(graph_app.get_state, run_config)
-        _update_state_cache(snapshot)
-        _memory_cache["timestamp"] = 0.0  # invalidate memory cache
-
-        if snapshot.next and "human" in snapshot.next:
-            update_pipeline(step_id="human", running=True)
-            await manager.broadcast({"type": "waiting_approval", "next": list(snapshot.next)})
-        else:
-            update_pipeline(running=False)
-            await manager.broadcast({"type": "pipeline_completed"})
-            logger.info("🎉 Pipeline finalizado com sucesso!")
-
-    except Exception as e:
-        tb = traceback.format_exc()
-        logger.error(f"💥 Erro FATAL no pipeline: {e}\n{tb}")
-        update_pipeline(running=False, error=str(e))
-        await manager.broadcast({"type": "error", "message": str(e)})
-
-    finally:
-        # SAFETY NET
-        with pipeline_lock:
-            if pipeline_state["is_running"]:
-                if not pipeline_state["error"]:
-                    pipeline_state["error"] = "Pipeline encerrado inesperadamente."
-                pipeline_state["is_running"] = False
-                logger.warning("⚠️  Safety-net: pipeline forçado a parar")
-
-
-# -- Endpoints -----------------------------------------------------------------
-
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket endpoint for real-time pipeline updates."""
-    await manager.connect(websocket)
-    try:
-        while True:
-            # Keep connection alive, wait for messages (ping/pong)
-            data = await websocket.receive_text()
-            if data == "ping":
-                await websocket.send_text("pong")
-    except WebSocketDisconnect:
-        await manager.disconnect(websocket)
-    except Exception as e:
-        logger.error(f"WebSocket error: {e}")
-        await manager.disconnect(websocket)
-
 @app.post("/agent/start")
 async def start_agent(req: StartRequest):
-    global current_thread_id, config
-    current_thread_id = str(uuid.uuid4())
-    config = {"configurable": {"thread_id": current_thread_id}}
+    global _current_run_id
+    run_id = str(uuid.uuid4())
+    _new_run(run_id)
+    _current_run_id = run_id
 
     initial_state = {
-        "messages": [HumanMessage(content=f"Iniciar pesquisa sobre: {req.topic}", name="human")],
-        "current_topic": req.topic,
+        "messages":        [HumanMessage(content=f"Iniciar pesquisa sobre: {req.topic}", name="human")],
+        "current_topic":   req.topic,
         "recommendations": [],
-        "content_plan": {},
-        "human_feedback": "",
-        "ceo_strategy": "",
+        "content_plan":    {},
+        "human_feedback":  "",
+        "ceo_strategy":    "",
+        "critic_attempts": 0,
     }
 
-    reset_pipeline()
-    with pipeline_lock:
-        pipeline_state["is_running"] = True
-        pipeline_state["started_at"] = time.time()
-        pipeline_state["current_step"] = "ceo"
-
-    # Use asyncio.create_task instead of threading.Thread for better compatibility
-    asyncio.create_task(_run_graph_in_background(initial_state, config))
-    logger.info(f"🚀 Pipeline iniciado para: {req.topic}")
-
-    return {"status": "started", "thread_id": current_thread_id}
-
-
-@app.get("/agent/status")
-async def get_status():
-    """Returns cached state — never touches graph_app."""
-    try:
-        with pipeline_lock:
-            is_running = pipeline_state["is_running"]
-            error = pipeline_state["error"]
-
-        with _state_cache_lock:
-            messages = list(_last_state_cache["messages"])
-            plan = dict(_last_state_cache["plan"]) if _last_state_cache["plan"] else {}
-            next_step = _last_state_cache["next"]
-
-        status = "IDLE"
-        if error and not is_running:
-            status = "IDLE"  # show error via pipeline, but status returns to idle
-        elif next_step and "human" in next_step:
-            status = "WAITING_FOR_APPROVAL"
-        elif is_running:
-            status = "PROCESSING"
-
-        return {"status": status, "messages": messages, "plan": plan}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-
-@app.get("/agent/pipeline")
-async def get_pipeline():
-    with pipeline_lock:
-        elapsed = None
-        if pipeline_state["started_at"]:
-            elapsed = round(time.time() - pipeline_state["started_at"], 1)
-
-        return {
-            "is_running": pipeline_state["is_running"],
-            "current_step": pipeline_state["current_step"],
-            "steps_completed": list(pipeline_state["steps_completed"]),
-            "steps": PIPELINE_STEPS,
-            "elapsed_seconds": elapsed,
-            "error": pipeline_state["error"],
-        }
+    asyncio.create_task(_run_pipeline(run_id, initial_state))
+    logger.info(f"🚀 Pipeline started: {req.topic}")
+    return {"status": "started", "run_id": run_id}
 
 
 @app.post("/agent/feedback")
 async def submit_feedback(req: FeedbackRequest):
+    run = _runs.get(_current_run_id) if _current_run_id else None
+    if not run or run["done"]:
+        return {"status": "error", "detail": "no active run"}
+
     feedback_str = "y" if req.approved else f"n. {req.comments}"
+    await asyncio.to_thread(graph_app.update_state, run["config"], {"human_feedback": feedback_str})
+    logger.info(f"📨 Feedback received: {feedback_str}")
 
-    await asyncio.to_thread(graph_app.update_state, config, {"human_feedback": feedback_str})
-    logger.info(f"📨 Feedback recebido: {feedback_str}")
-
-    update_pipeline(
-        step_id="writer" if req.approved else "product_manager",
-        running=True,
-        completed_step="human",
-    )
-
-    asyncio.create_task(_run_graph_in_background(None, config))
-
+    run["feedback"].set()   # unblocks _run_pipeline → Phase 2
     return {"status": "resumed"}
 
 
-# -- Memory Cache --------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Utility endpoints
+# ---------------------------------------------------------------------------
 
-_memory_cache = {"value": "", "timestamp": 0.0}
-_MEMORY_CACHE_TTL = 30
+@app.get("/agent/status")
+async def get_status():
+    """Health-check + simple status for the run.sh readiness probe."""
+    run = _runs.get(_current_run_id) if _current_run_id else None
+    if not run or run["done"]:
+        return {"status": "IDLE"}
+    waiting = any(e.get("type") == "waiting_approval" for e in run["events"])
+    if waiting and not run["feedback"].is_set():
+        return {"status": "WAITING_FOR_APPROVAL"}
+    return {"status": "PROCESSING"}
+
+
+@app.get("/agent/logs")
+def get_logs():
+    return {"logs": _ring.entries}
+
+
+_mem_cache: dict = {"value": "", "ts": 0.0}
+_MEM_TTL = 30.0
 
 
 @app.get("/agent/memory")
 async def get_memory():
-    """Async — ChromaDB query is offloaded to a thread so it never blocks the event loop."""
+    now = time.time()
+    if now - _mem_cache["ts"] < _MEM_TTL and _mem_cache["value"]:
+        return {"memory": _mem_cache["value"]}
     try:
-        with pipeline_lock:
-            is_running = pipeline_state["is_running"]
-
-        if is_running:
-            return {"memory": _memory_cache["value"] or "Pipeline em execução…"}
-
-        now = time.time()
-        if now - _memory_cache["timestamp"] < _MEMORY_CACHE_TTL and _memory_cache["value"]:
-            return {"memory": _memory_cache["value"]}
-
-        # Offload ChromaDB query to thread
-        def _query_memory():
-            mem = MemoryManager()
-            return mem.retrieve_relevant_context("feedback decision rationale", k=5)
-
-        try:
-            context = await asyncio.to_thread(_query_memory)
-        except Exception as e:
-            logger.warning(f"Erro ao acessar ChromaDB: {e}")
-            return {"memory": _memory_cache["value"] or f"Erro: {e}"}
-
-        _memory_cache["value"] = context
-        _memory_cache["timestamp"] = now
-        return {"memory": context}
-    except Exception as e:
-        return {"memory": _memory_cache["value"] or f"Erro: {e}"}
+        def _query():
+            return MemoryManager().retrieve_relevant_context("feedback decision rationale", k=5)
+        result = await asyncio.to_thread(_query)
+        _mem_cache["value"] = result or "Nenhuma memória registrada ainda."
+        _mem_cache["ts"] = now
+        return {"memory": _mem_cache["value"]}
+    except Exception as exc:
+        return {"memory": _mem_cache["value"] or f"Erro: {exc}"}
 
 
 @app.get("/agent/posts")
 def get_posts():
     try:
-        posts_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "posts.json")
-        if os.path.exists(posts_file):
-            with open(posts_file, "r") as f:
-                posts = json.load(f)
-            return {"posts": posts}
+        f = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "posts.json")
+        if os.path.exists(f):
+            with open(f) as fp:
+                return {"posts": json.load(fp)}
         return {"posts": []}
-    except Exception as e:
-        return {"posts": [], "error": str(e)}
-
-
-@app.get("/agent/logs")
-def get_logs():
-    with memory_handler.lock:
-        return {"logs": list(memory_handler.logs)}
+    except Exception as exc:
+        return {"posts": [], "error": str(exc)}
 
 
 @app.post("/agent/analyze")
 async def analyze_portfolio():
-    """Run portfolio analysis in a thread to avoid blocking the event loop."""
-    def _run_analysis():
+    def _run():
         analyst = AnalystAgent()
-        posts = []
-        posts_file = os.path.join(os.path.dirname(__file__), "..", "data", "posts.json")
-        if os.path.exists(posts_file):
-            with open(posts_file, "r") as f:
-                posts = json.load(f)
+        f = os.path.join(os.path.dirname(__file__), "..", "data", "posts.json")
+        posts = json.load(open(f)) if os.path.exists(f) else []
         return analyst.analyze_portfolio(posts)
-
     try:
-        result = await asyncio.to_thread(_run_analysis)
-        return result
-    except Exception as e:
-        logger.error(f"❌ Analyze endpoint failed: {e}")
-        return {"error": str(e), "recommendations": []}
+        return await asyncio.to_thread(_run)
+    except Exception as exc:
+        logger.error(f"❌ Analyze failed: {exc}")
+        return {"error": str(exc), "recommendations": []}
 
 
 if __name__ == "__main__":
