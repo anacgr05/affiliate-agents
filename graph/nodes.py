@@ -146,12 +146,14 @@ def critic_node(state):
     else:
         issues = result.get("issues", [])
         recs = result.get("recommendations", [])
+        attempts = state.get("critic_attempts", 0) + 1
         issues_md = ("\n\n**Problemas:**\n" + "\n".join(f"- {i}" for i in issues)) if issues else ""
         recs_md = ("\n\n**Recomendações:**\n" + "\n".join(f"- {r}" for r in recs)) if recs else ""
         feedback = f"{summary}. " + "; ".join(issues) + (" — " + "; ".join(recs) if recs else "")
         message = f"**Revisão Reprovada** ❌ (Score: {score}/10)\n\n{summary}{issues_md}{recs_md}"
         return {
             "critic_feedback": feedback,
+            "critic_attempts": attempts,
             "messages": [AIMessage(content=message, name="critic")],
         }
 

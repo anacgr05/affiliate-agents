@@ -25,15 +25,19 @@ class AgentState(TypedDict):
     critic_feedback: str
     human_feedback: str
     ceo_strategy: str  # CEO's editorial strategy directive for downstream agents
+    critic_attempts: int  # tracks revision loops to prevent infinite cycling
 
 
 # --- Routing Logic ---
+MAX_CRITIC_ATTEMPTS = 2  # max revision loops before forcing approval
+
+
 def should_continue_critic(state: AgentState):
     feedback = state.get("critic_feedback", "")
-    if feedback == "approved":
+    attempts = state.get("critic_attempts", 0)
+    if feedback == "approved" or attempts >= MAX_CRITIC_ATTEMPTS:
         return "human"
-    else:
-        return "product_manager"
+    return "product_manager"
 
 
 def should_continue_human(state: AgentState):
