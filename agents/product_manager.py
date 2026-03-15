@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from services.llm_config import OPENROUTER_API_BASE, get_openrouter_model, LLM_TIMEOUT_SHORT, LLM_TIMEOUT_LONG
 import logging
 
 logger = logging.getLogger(__name__)
@@ -19,9 +20,11 @@ class ProductManagerAgent:
         self.memory = MemoryManager()
         self.llm = ChatOpenAI(
             openai_api_key=os.getenv("OPENROUTER_API_KEY"),
-            openai_api_base="https://openrouter.ai/api/v1",
-            model_name="openrouter/auto", # Auto-routing as requested
-            temperature=0.7
+            openai_api_base=OPENROUTER_API_BASE,
+            model_name=get_openrouter_model(),
+            temperature=0.7,
+            request_timeout=LLM_TIMEOUT_LONG,  # create_content is the heaviest call (~38s)
+            max_retries=0,
         )
         self.search_api_key = os.getenv("SEARCHAPI_KEY")
 
@@ -99,13 +102,20 @@ class ProductManagerAgent:
         Critic Feedback to Address: {critic_feedback}
         Human Feedback to Address: {human_feedback}
 
+        **CEO STRATEGIC DIRECTIVE (FOLLOW THIS!):**
+        {ceo_strategy}
+
         Available Products: {products_summary}
+
+        IMPORTANT: You MUST align your plan with the CEO's strategic directive above.
+        The CEO has analyzed the market, portfolio gaps, and SEO opportunities.
+        Your plan should reflect their recommended angle, target audience, and focus keywords.
 
         Return a JSON object with:
         - "topic": The topic
-        - "target_audience": Who is this for?
+        - "target_audience": Who is this for? (align with CEO directive)
         - "key_products": List of top 3 product names selected from available products.
-        - "angle": The specific angle (e.g., "Best for Students", "2025 Guide").
+        - "angle": The specific angle (align with CEO's recommended angle)
         - "improvements_made": How you addressed the feedback.
         """
 
@@ -116,7 +126,7 @@ class ProductManagerAgent:
 
         self.plan_chain = self.plan_prompt | self.llm | StrOutputParser()
 
-    def create_plan(self, topic, recommendations, critic_feedback="", human_feedback=""):
+    def create_plan(self, topic, recommendations, critic_feedback="", human_feedback="", ceo_strategy=""):
         logger.info(f"📝 Product Manager planning for: {topic}...")
 
         # Retrieve context
@@ -131,7 +141,8 @@ class ProductManagerAgent:
                 "memory_context": context,
                 "critic_feedback": critic_feedback,
                 "human_feedback": human_feedback,
-                "products_summary": products_summary
+                "products_summary": products_summary,
+                "ceo_strategy": ceo_strategy or "Nenhuma diretriz específica — use seu melhor julgamento.",
             })
             cleaned_response = response.replace("```json", "").replace("```", "").strip()
             return json.loads(cleaned_response)

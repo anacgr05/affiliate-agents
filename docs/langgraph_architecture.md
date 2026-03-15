@@ -1,61 +1,112 @@
-# Multi-Agent Collaboration Strategy (LangGraph)
+# Grafo LangGraph
 
-## Goal
-Transform the linear script into a stateful, interactive multi-agent system where:
-1.  Agents communicate via a shared state (chat history).
-2.  The User can view the conversation (`conversation_history.md`).
-3.  The User can intervene/approve decisions (Human-in-the-loop).
+## AgentState
 
-## Architecture: The "Affiliate Graph"
+O estado compartilhado entre todos os nós é definido como um `TypedDict` em `graph/workflow.py`:
 
-We will use **LangGraph** to define the workflow.
-
-### Shared State (`AgentState`)
 ```python
 class AgentState(TypedDict):
-    messages: Annotated[List[BaseMessage], operator.add]
-    next_step: str
-    current_topic: str
-    recommendations: List[dict]
-    content_plan: dict
-    human_feedback: str
+    messages: Annotated[List[BaseMessage], operator.add]  # acumulador
+    current_topic: str          # tópico da pesquisa (input do usuário)
+    recommendations: List[dict] # produtos retornados pela SearchAPI
+    content_plan: dict          # plano de conteúdo criado pelo ProductManager
+    critic_feedback: str        # "approved" ou texto de feedback
+    human_feedback: str         # "y" (aprovar) ou "n. <motivo>"
+    ceo_strategy: str           # diretiva estratégica do CEO
+    critic_attempts: int        # contador de loops de revisão
 ```
 
-### Nodes (Agents)
-1.  **CEO Node**:
-    - Input: User request or previous agent output.
-    - Action: Decides the high-level strategy or delegates.
-    - Output: Updates `messages` with instructions.
-2.  **Portfolio Node**:
-    - Input: Strategy/Topic.
-    - Action: Uses SearchAPI to find products.
-    - Output: Updates `recommendations` and `messages`.
-3.  **Product Manager Node**:
-    - Input: Recommendations.
-    - Action: Creates a *Content Plan* (Title, Angle, Structure) - NOT the full content yet.
-    - Output: Updates `content_plan` and `messages`.
-4.  **Human Node (The User)**:
-    - Input: The Content Plan.
-    - Action: Pauses execution. Displays the plan. Asks for approval or feedback.
-    - Output: `human_feedback` (Approve / Change request).
-5.  **Writer Node** (formerly part of PM):
-    - Input: Approved Plan.
-    - Action: Generates the full Markdown content.
-    - Output: Saves file and updates `messages`.
+O campo `messages` usa `operator.add` como reducer — cada nó que retorna `messages` os acumula, nunca os substitui.
 
-### Workflow (Edges)
-1.  Start -> CEO
-2.  CEO -> Portfolio
-3.  Portfolio -> PM
-4.  PM -> **Human** (Review Plan)
-5.  **Human**:
-    - If "Approve" -> Writer
-    - If "Changes" -> PM (Regenerate Plan)
-6.  Writer -> End
+## Fluxo do grafo
 
-## Observability
-*   **Console**: Real-time streaming of agent thoughts.
-*   **`logs/conversation.md`**: Appends every message to a markdown file for persistent history.
+```
+[entrada]
+    │
+    ▼
+  ceo ──────────────────────────────────────► portfolio
+                                                  │
+                                                  ▼
+                                          product_manager ◄────────────────┐
+                                                  │                        │
+                                                  ▼                        │
+                                               critic                      │
+                                                  │                        │
+                          ┌───────────────────────┤                        │
+                          │ reprovado             │ aprovado               │
+                          │ (attempts < 2)        │ (ou attempts >= 2)     │
+                          │                       ▼                        │
+                          │                     human ── interrupt aqui    │
+                          │                       │                        │
+                          │         ┌─────────────┤                        │
+                          │         │ rejeitado   │ aprovado               │
+                          │         └─────────────┼────────────────────────┘
+                          └───────► product_mgr   ▼
+                                               writer
+                                                  │
+                                                  ▼
+                                               [END]
+```
 
-## Tech Stack Updates
-*   Add `langgraph` to `requirements.txt`.
+## Definição dos nós
+
+### `ceo_node`
+Lê `data/posts.json` para contexto de publicações existentes e chama `CEOAgent.define_strategy()`. Retorna `ceo_strategy` (diretiva editorial) e uma mensagem.
+
+### `portfolio_node`
+Chama `PortfolioManagerAgent.analyze_and_recommend()` e `search_products()` via SearchAPI. Retorna `recommendations` com os produtos encontrados (máx. 5 exibidos na mensagem).
+
+### `product_manager_node`
+Chama `ProductManagerAgent.create_plan()`, passando `topic`, `recommendations`, `critic_feedback`, `human_feedback` e `ceo_strategy`. Retorna `content_plan` com campos `topic`, `angle`, `target_audience` e `key_products`.
+
+### `critic_node`
+Consulta o `MemoryManager` para contexto de decisões passadas. Chama `CriticAgent.review_plan()`. Se reprovado, incrementa `critic_attempts` e retorna feedback detalhado. Se aprovado, retorna `critic_feedback = "approved"`.
+
+### `human_node`
+Nó de passagem — o LangGraph interrompe o grafo antes deste nó (via `interrupt_before=["human"]`). Quando retomado, lê `human_feedback` do estado (injetado pelo endpoint `POST /agent/feedback`) e gera uma mensagem de confirmação.
+
+### `writer_node`
+Chama `ProductManagerAgent.create_content()` para gerar o artigo. Enriquece cada produto com preços reais via `find_product_offers()`. Salva o artigo em `data/posts.json` e registra a decisão no `MemoryManager`.
+
+## Lógica de roteamento
+
+### `should_continue_critic(state)`
+
+```python
+MAX_CRITIC_ATTEMPTS = 2
+
+def should_continue_critic(state):
+    feedback = state.get("critic_feedback", "")
+    attempts = state.get("critic_attempts", 0)
+    if feedback == "approved" or attempts >= MAX_CRITIC_ATTEMPTS:
+        return "human"
+    return "product_manager"
+```
+
+### `should_continue_human(state)`
+
+```python
+def should_continue_human(state):
+    if state["human_feedback"].lower().startswith("y"):
+        return "writer"
+    return "product_manager"
+```
+
+## Compilação
+
+```python
+checkpointer = MemorySaver()
+app = workflow.compile(
+    checkpointer=checkpointer,
+    interrupt_before=["human"]
+)
+```
+
+O `MemorySaver` persiste o estado do grafo em memória, indexado pelo `thread_id` passado na configuração. Isso permite que o backend retome a execução após o feedback humano com `graph.astream(None, config)`.
+
+## Execução em duas fases
+
+O backend executa o grafo em duas chamadas a `graph.astream()`:
+
+1. **Fase 1**: `astream(initial_state, config)` — executa até o interrupt antes do nó `human`
+2. **Fase 2**: `astream(None, config)` — retoma a partir do checkpoint com o `human_feedback` já injetado no estado via `graph.update_state()`
