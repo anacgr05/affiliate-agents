@@ -12,7 +12,7 @@ case "${1:-all}" in
       --reload \
       --reload-dir backend --reload-dir graph --reload-dir agents --reload-dir services \
       --reload-exclude '__pycache__' \
-      --timeout-keep-alive 120
+      --timeout-keep-alive 0
     ;;
   frontend|front|f)
     echo "🚀 Iniciando frontend..."
@@ -37,7 +37,7 @@ case "${1:-all}" in
     trap cleanup EXIT INT TERM
 
     PYTHONPATH=. uvicorn backend.server:app --host 0.0.0.0 --port 8000 \
-      --timeout-keep-alive 120 &
+      --timeout-keep-alive 0 &
     BACKEND_PID=$!
 
     # Aguarda o backend estar pronto antes de iniciar o frontend
