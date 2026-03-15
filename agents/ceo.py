@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from services.llm_config import OPENROUTER_API_BASE, get_openrouter_model
+from services.llm_config import OPENROUTER_API_BASE, get_openrouter_model, LLM_TIMEOUT_MEDIUM
 
 from services.memory import MemoryManager
 
@@ -28,8 +28,8 @@ class CEOAgent:
             openai_api_base=OPENROUTER_API_BASE,
             model_name=get_openrouter_model(),
             temperature=0.6,
-            request_timeout=120,
-            max_retries=1,
+            request_timeout=LLM_TIMEOUT_MEDIUM,
+            max_retries=0,
         )
 
         self.system_prompt = """

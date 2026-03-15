@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from services.llm_config import OPENROUTER_API_BASE, get_openrouter_model
+from services.llm_config import OPENROUTER_API_BASE, get_openrouter_model, LLM_TIMEOUT_MEDIUM
 
 logger = logging.getLogger(__name__)
 
@@ -25,9 +25,9 @@ class CriticAgent:
             openai_api_key=os.getenv("OPENROUTER_API_KEY"),
             openai_api_base=OPENROUTER_API_BASE,
             model_name=get_openrouter_model(),
-            temperature=0.4,  # Lower temp for analytical reviews
-            request_timeout=120,
-            max_retries=1,
+            temperature=0.4,
+            request_timeout=LLM_TIMEOUT_MEDIUM,
+            max_retries=0,
         )
 
         self.system_prompt = """

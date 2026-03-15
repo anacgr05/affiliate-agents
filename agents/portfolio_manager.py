@@ -6,7 +6,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 import logging
-from services.llm_config import OPENROUTER_API_BASE, get_openrouter_model
+from services.llm_config import OPENROUTER_API_BASE, get_openrouter_model, LLM_TIMEOUT_MEDIUM
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +20,8 @@ class PortfolioManagerAgent:
             openai_api_base=OPENROUTER_API_BASE,
             model_name=get_openrouter_model(),
             temperature=0.5,
-            request_timeout=120,
-            max_retries=1,
+            request_timeout=LLM_TIMEOUT_MEDIUM,
+            max_retries=0,
         )
         self.search_api_key = os.getenv("SEARCHAPI_KEY")
 
