@@ -1,13 +1,26 @@
 import os
-from langchain_chroma import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_core.documents import Document
+import logging
+import threading
+
+logger = logging.getLogger(__name__)
+
+# Memory is DISABLED by default to avoid loading HuggingFace models (~90MB)
+# which cause GIL starvation and block the uvicorn event loop.
+# Enable with ENABLE_MEMORY=1 environment variable.
+MEMORY_ENABLED = os.getenv("ENABLE_MEMORY", "0") == "1"
 
 
 class MemoryManager:
-    """Singleton — the HuggingFace model is loaded once and reused."""
+    """Singleton — the HuggingFace model is loaded once and reused.
+
+    Disabled by default (ENABLE_MEMORY=0). When disabled, all methods
+    are no-ops that return empty results. This avoids loading torch,
+    transformers, and the all-MiniLM-L6-v2 model (~90MB) which causes
+    GIL starvation and blocks HTTP responses.
+    """
 
     _instance = None
+    _lock = threading.Lock()
 
     def __new__(cls, persist_directory="./memory_db"):
         if cls._instance is None:
@@ -21,7 +34,17 @@ class MemoryManager:
         self._initialized = True
         self.persist_directory = persist_directory
 
-        # Load the embedding model once
+        if not MEMORY_ENABLED:
+            logger.info("🧠 MemoryManager disabled (ENABLE_MEMORY=0)")
+            self.embeddings = None
+            self.vector_store = None
+            return
+
+        # Heavy imports — only when memory is enabled
+        from langchain_chroma import Chroma
+        from langchain_huggingface import HuggingFaceEmbeddings
+
+        logger.info("🧠 MemoryManager: Loading HuggingFace embeddings...")
         self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
         self.vector_store = Chroma(
@@ -29,9 +52,15 @@ class MemoryManager:
             embedding_function=self.embeddings,
             persist_directory=self.persist_directory,
         )
+        logger.info("🧠 MemoryManager: Ready")
 
     def add_decision(self, topic, decision, agent_role, rationale=""):
-        """Stores a decision in the vector database."""
+        """Stores a decision in the vector database (thread-safe)."""
+        if not MEMORY_ENABLED or self.vector_store is None:
+            return
+
+        from langchain_core.documents import Document
+
         doc = Document(
             page_content=f"Topic: {topic}\nDecision: {decision}\nRationale: {rationale}",
             metadata={
@@ -44,12 +73,17 @@ class MemoryManager:
                 ),
             },
         )
-        self.vector_store.add_documents([doc])
-        print(f"💾 Memory: Saved decision for '{topic}' by {agent_role}.")
+        with self._lock:
+            self.vector_store.add_documents([doc])
+        logger.info(f"💾 Memory: Saved decision for '{topic}' by {agent_role}.")
 
     def retrieve_relevant_context(self, query, k=3):
-        """Retrieves relevant past decisions."""
-        results = self.vector_store.similarity_search(query, k=k)
+        """Retrieves relevant past decisions (thread-safe)."""
+        if not MEMORY_ENABLED or self.vector_store is None:
+            return ""
+
+        with self._lock:
+            results = self.vector_store.similarity_search(query, k=k)
         if not results:
             return ""
 
@@ -58,6 +92,7 @@ class MemoryManager:
 
 
 if __name__ == "__main__":
+    os.environ["ENABLE_MEMORY"] = "1"
     mem = MemoryManager()
     mem.add_decision("notebooks", "Focus on battery life for business users", "CEO")
     print(mem.retrieve_relevant_context("laptop strategy"))

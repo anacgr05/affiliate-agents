@@ -335,6 +335,8 @@ _mem_cache: dict = {"value": "", "ts": 0.0}
 _MEM_TTL = 30.0
 
 
+# -- Memory/RAG (disabled by default — see services/memory.py) ----------------
+
 @app.get("/agent/memory")
 async def get_memory():
     now = time.time()
@@ -353,6 +355,7 @@ async def get_memory():
 
 @app.get("/agent/posts")
 def get_posts():
+    """Sync def — file I/O runs in thread pool."""
     try:
         f = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "posts.json")
         if os.path.exists(f):
