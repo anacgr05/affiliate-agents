@@ -80,8 +80,8 @@ Se REPROVADO:
 }}
 
 Critérios de aprovação:
-- Score >= 7.0 → aprovado
-- Score < 7.0 → reprovado com recomendações claras
+- Score > 8.0 → aprovado (exigência alta — o artigo precisa ter potencial real de ranquear e converter)
+- Score <= 8.0 → reprovado com recomendações claras e acionáveis para o gestor de produto
 - Desalinhamento com a estratégia do CEO → reprovado independente do score
 
 Seja exigente mas justo. Lembre-se: estamos construindo autoridade no mercado brasileiro.

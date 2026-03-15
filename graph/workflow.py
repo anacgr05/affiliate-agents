@@ -29,7 +29,7 @@ class AgentState(TypedDict):
 
 
 # --- Routing Logic ---
-MAX_CRITIC_ATTEMPTS = 2  # max revision loops before forcing approval
+MAX_CRITIC_ATTEMPTS = 3  # max revision loops before forcing approval (score > 8 required)
 
 
 def should_continue_critic(state: AgentState):

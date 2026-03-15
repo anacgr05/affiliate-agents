@@ -132,10 +132,14 @@ def critic_node(state):
     critic = CriticAgent()
     result = critic.review_plan(plan, memory_context=memory_context, ceo_strategy=ceo_strategy)
 
-    score = result.get("score", "?")
+    score = result.get("score", 0)
     summary = result.get("summary", "")
 
-    if result.get("approved"):
+    # Enforce score > 8 programmatically — don't trust LLM-level "approved" alone.
+    llm_approved = result.get("approved", False)
+    actually_approved = llm_approved and float(score) > 8.0
+
+    if actually_approved:
         suggestions = result.get("suggestions", [])
         suggestions_md = ("\n\n**Sugestões:**\n" + "\n".join(f"- {s}" for s in suggestions)) if suggestions else ""
         message = f"**Revisão Aprovada** ✅ (Score: {score}/10)\n\n{summary}{suggestions_md}"
@@ -147,10 +151,24 @@ def critic_node(state):
         issues = result.get("issues", [])
         recs = result.get("recommendations", [])
         attempts = state.get("critic_attempts", 0) + 1
+
+        # Rich feedback for product_manager: score + issues + recs + CEO alignment reminder
+        score_note = f"Score atual: {score}/10 (mínimo necessário: > 8.0)."
+        if llm_approved and float(score) <= 8.0:
+            # LLM approved but score not high enough — make this explicit
+            issues = issues or [f"Score {score}/10 não atinge o mínimo de 8.0 para aprovação automática."]
+            recs = recs or ["Reforce o ângulo de diferenciação, especificidade do público e potencial de conversão."]
+
+        feedback_parts = [score_note, summary]
+        if issues:
+            feedback_parts.append("Problemas: " + "; ".join(issues))
+        if recs:
+            feedback_parts.append("Recomendações: " + "; ".join(recs))
+        feedback = " | ".join(feedback_parts)
+
         issues_md = ("\n\n**Problemas:**\n" + "\n".join(f"- {i}" for i in issues)) if issues else ""
         recs_md = ("\n\n**Recomendações:**\n" + "\n".join(f"- {r}" for r in recs)) if recs else ""
-        feedback = f"{summary}. " + "; ".join(issues) + (" — " + "; ".join(recs) if recs else "")
-        message = f"**Revisão Reprovada** ❌ (Score: {score}/10)\n\n{summary}{issues_md}{recs_md}"
+        message = f"**Revisão Reprovada** ❌ (Score: {score}/10 — mínimo > 8.0)\n\n{summary}{issues_md}{recs_md}"
         return {
             "critic_feedback": feedback,
             "critic_attempts": attempts,
