@@ -148,10 +148,24 @@ FORMATO DE SAÍDA — retorne SOMENTE o JSON abaixo, sem texto adicional:
         Nunca lança exceção — em caso de falha retorna score 0 para que o
         pipeline reencaminhe ao Product Manager em vez de aprovar cegamente.
         """
+        def product_to_text(product: str | dict | object) -> str:
+            if isinstance(product, str):
+                return product
+            if isinstance(product, dict):
+                return (
+                    product.get("name")
+                    or product.get("title")
+                    or product.get("product_name")
+                    or product.get("model")
+                    or str(product)
+                )
+            return str(product)
+
         topic = plan.get("topic", "")
         angle = plan.get("angle", "")
         target_audience = plan.get("target_audience", "")
-        key_products = ", ".join(plan.get("key_products", []))
+        raw_key_products: list[object] = plan.get("key_products", []) or []
+        key_products = ", ".join(product_to_text(p) for p in raw_key_products)
 
         logger.info(f"🧐 Critic: Reviewing plan — Topic: {topic}, Angle: {angle}")
 

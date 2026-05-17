@@ -1,7 +1,7 @@
 import os
 
 OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
-DEFAULT_OPENROUTER_MODEL = "z-ai/glm-5-turbo"
+DEFAULT_OPENROUTER_MODEL = "google/gemini-2.5-flash"
 
 # Timeouts calibrated from real pipeline measurements (stepfun free tier):
 #   CEO: ~28s | Portfolio analyze: ~20s | Product Manager: ~8s
@@ -13,5 +13,5 @@ LLM_TIMEOUT_LONG = 90    # Writer (~38s calls, most complex prompt)
 
 
 def get_openrouter_model() -> str:
-    """Return configured OpenRouter model, defaulting to StepFun Step 3.5 Flash free tier."""
+    """Return configured OpenRouter model, defaulting to Gemini 2.5 Flash."""
     return os.getenv("OPENROUTER_MODEL", DEFAULT_OPENROUTER_MODEL)
