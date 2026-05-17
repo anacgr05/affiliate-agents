@@ -1,7 +1,7 @@
 import os
 
 OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
-DEFAULT_OPENROUTER_MODEL = "stepfun/step-3.5-flash:free"
+DEFAULT_OPENROUTER_MODEL = "z-ai/glm-5-turbo"
 
 # Timeouts calibrated from real pipeline measurements (stepfun free tier):
 #   CEO: ~28s | Portfolio analyze: ~20s | Product Manager: ~8s

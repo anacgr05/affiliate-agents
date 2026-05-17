@@ -244,17 +244,11 @@ def writer_node(state):
                     except Exception as e:
                         logger.warning(f"⚠️ Failed to enrich {product_name}: {e}")
 
-        # --- IMAGE GENERATION ---
-        # TEMPORARIAMENTE DESABILITADO - focando na geração do artigo
-        # TODO: Re-habilitar quando resolver timeout da API de imagem
-        if "hero" in article_data and "image_prompt" in article_data["hero"]:
-            # prompt = article_data["hero"]["image_prompt"]
-            # image_url = generate_hero_image(prompt)
-            # article_data["hero"]["image"] = image_url
-            article_data["hero"]["image"] = "https://placehold.co/1200x600?text=Hero+Image"
-            logger.info(f"🖼️ Using placeholder image (generation disabled)")
+        # --- IMAGE: set placeholder — geração real acontece no worker (Epic-03) ---
+        if "hero" in article_data:
+            article_data["hero"]["image"] = "https://placehold.co/1200x600?text=Gerando+Capa..."
 
-        # --- SAVE TO FILE ---
+        # --- SAVE TO FILE (backward compat) ---
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         output_dir = os.path.join(project_root, "data")
         os.makedirs(output_dir, exist_ok=True)
@@ -267,13 +261,38 @@ def writer_node(state):
                     posts = json.load(f)
                 except Exception as e:
                     logger.warning(f"⚠️ Failed to load existing posts: {e}")
-                    posts = []
 
+        slug = article_data.get("slug", "")
+        posts = [p for p in posts if p.get("slug") != slug]
         posts.append(article_data)
         with open(posts_file, "w", encoding="utf-8") as f:
             json.dump(posts, f, indent=2, ensure_ascii=False)
-
         logger.info(f"✅ Article saved to {posts_file}")
+
+        # --- SAVE TO DATABASE (Epic-01 Story-01.01) ---
+        post_db_id: int | None = None
+        try:
+            from services.post_repository import save_post
+            post_db_id = save_post(article_data)
+            logger.info(f"✅ Article saved to PostgreSQL: id={post_db_id}")
+        except Exception as exc:
+            logger.warning(f"⚠️ DB save failed (Docker running?): {exc}")
+
+        # --- DISPATCH IMAGE JOB (Epic-03 Story-03.02) ---
+        if post_db_id is not None:
+            image_prompt: str = (
+                article_data.get("hero", {}).get("image_prompt")  # type: ignore[union-attr]
+                or article_data.get("title", "")
+            )
+            try:
+                from backend.celery_app import celery_app
+                celery_app.send_task(
+                    "backend.worker.generate_image_task",
+                    args=[post_db_id, image_prompt],
+                )
+                logger.info(f"📤 Image job dispatched for post_id={post_db_id}")
+            except Exception as exc:
+                logger.warning(f"⚠️ Celery dispatch failed (Redis running?): {exc}")
 
         # --- SAVE TO MEMORY ---
         try:
