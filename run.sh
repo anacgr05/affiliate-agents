@@ -8,6 +8,12 @@ case "${1:-all}" in
   backend|back|b)
     echo "🚀 Iniciando backend..."
     source venv/bin/activate
+    docker compose up -d
+    sleep 2
+    PYTHONPATH=. python backend/init_db.py
+    PYTHONPATH=. celery -A backend.worker worker --loglevel=info -Q main-queue,celery &
+    CELERY_PID=$!
+
     PYTHONPATH=. uvicorn backend.server:app --host 0.0.0.0 --port 8000 \
       --reload \
       --reload-dir backend --reload-dir graph --reload-dir agents --reload-dir services \
@@ -31,10 +37,17 @@ case "${1:-all}" in
     cleanup() {
       echo ""
       echo "🛑 Parando processos..."
-      kill "$BACKEND_PID" 2>/dev/null
+      kill "$BACKEND_PID" "$CELERY_PID" 2>/dev/null
+      docker compose -f "$DIR/docker-compose.yml" stop 2>/dev/null
       wait "$BACKEND_PID" 2>/dev/null
     }
     trap cleanup EXIT INT TERM
+
+    docker compose up -d
+    sleep 2
+    PYTHONPATH=. python backend/init_db.py
+    PYTHONPATH=. celery -A backend.worker worker --loglevel=info -Q main-queue,celery &
+    CELERY_PID=$!
 
     PYTHONPATH=. uvicorn backend.server:app --host 0.0.0.0 --port 8000 \
       --timeout-keep-alive 0 &
