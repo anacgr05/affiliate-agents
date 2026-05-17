@@ -15,9 +15,13 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage
+from backend.celery_app import celery_app
+from backend.database import AsyncSessionLocal, Post
 from graph.workflow import app as graph_app
+from sqlalchemy import select
 import asyncio
 import uuid
 import json
@@ -99,6 +103,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+_images_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "images")
+os.makedirs(_images_dir, exist_ok=True)
+app.mount("/images", StaticFiles(directory=_images_dir), name="images")
 
 # ---------------------------------------------------------------------------
 # Run store
@@ -355,7 +363,15 @@ async def get_memory():
 
 @app.get("/agent/posts")
 def get_posts():
-    """Sync def — file I/O runs in thread pool."""
+    """Return posts from PostgreSQL, falling back to posts.json if DB is unavailable."""
+    try:
+        from services.post_repository import get_all_posts
+        db_posts = get_all_posts()
+        if db_posts:
+            return {"posts": db_posts}
+    except Exception as exc:
+        logger.warning(f"DB read failed, falling back to JSON: {exc}")
+
     try:
         f = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "posts.json")
         if os.path.exists(f):
@@ -364,6 +380,83 @@ def get_posts():
         return {"posts": []}
     except Exception as exc:
         return {"posts": [], "error": str(exc)}
+
+
+@app.get("/agent/posts/stream")
+async def stream_post_image(slug: str, request: Request):
+    """SSE stream de status de imagem para um post por slug (Story-04.03).
+
+    Poll a cada 3s no banco até o status ser 'ready' ou 'image_failed'.
+    Emite keepalive enquanto ainda 'image_pending'.
+    """
+    async def generate():
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                async with AsyncSessionLocal() as session:
+                    result = await session.execute(select(Post).where(Post.slug == slug))
+                    post = result.scalar_one_or_none()
+
+                if post and post.image_status == "ready":
+                    yield f"data: {json.dumps({'type': 'image_ready', 'url': post.image_url})}\n\n"
+                    break
+                elif post and post.image_status == "image_failed":
+                    yield f"data: {json.dumps({'type': 'image_failed'})}\n\n"
+                    break
+            except Exception:
+                pass
+            yield ": keepalive\n\n"
+            await asyncio.sleep(3.0)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/agent/posts/backfill")
+async def backfill_posts():
+    """Persist all posts from posts.json to PostgreSQL and dispatch image jobs for each."""
+    def _run() -> dict:
+        from services.post_repository import ensure_tables_exist, save_post
+
+        ensure_tables_exist()
+
+        posts_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "data", "posts.json"
+        )
+        if not os.path.exists(posts_path):
+            return {"dispatched": [], "failed": [], "message": "posts.json não encontrado"}
+
+        with open(posts_path, encoding="utf-8") as fh:
+            posts: list[dict] = json.load(fh)
+
+        dispatched: list[dict] = []
+        failed: list[dict] = []
+
+        for post in posts:
+            slug: str = post.get("slug", "?")
+            prompt: str = (
+                post.get("hero", {}).get("image_prompt")  # type: ignore[union-attr]
+                or post.get("title", "")
+            )
+            try:
+                post_id = save_post(post)
+                celery_app.send_task(
+                    "backend.worker.generate_image_task",
+                    args=[post_id, prompt],
+                )
+                dispatched.append({"slug": slug, "post_id": post_id})
+                logger.info(f"[backfill] ✅ {slug} → post_id={post_id}")
+            except Exception as exc:
+                failed.append({"slug": slug, "error": str(exc)})
+                logger.warning(f"[backfill] ❌ {slug} → {exc}")
+
+        return {"dispatched": dispatched, "failed": failed}
+
+    return await asyncio.to_thread(_run)
 
 
 @app.post("/agent/analyze")
