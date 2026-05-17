@@ -2,20 +2,18 @@ import { NextRequest, NextResponse } from "next/server";
 import { request as httpRequest, IncomingMessage } from "node:http";
 import { Readable } from "node:stream";
 
-const BACKEND_HOST = "localhost";
-const BACKEND_PORT = 8000;
+// Set NEXT_PUBLIC_API_URL on Vercel (e.g. https://your-api.railway.app).
+// Falls back to http://localhost:8000 for local development.
+const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const _parsed = new URL(API_BASE);
 
-/**
- * Proxy using node:http with agent:false — a fresh TCP connection per request.
- *
- * Root cause of ECONNRESET: Node.js undici (used by global fetch) pools
- * connections. Uvicorn with --timeout-keep-alive 0 closes idle connections
- * on the server side; undici doesn't notice until it tries to reuse the
- * dead socket → ECONNRESET on every other request.
- *
- * agent:false bypasses the pool entirely and always opens a new socket.
- * headersTimeout:10_000 makes stale connections fail in <10s instead of 60s.
- */
+// For localhost: node:http with agent:false avoids ECONNRESET caused by uvicorn
+// closing idle connections that the Node.js undici pool tries to reuse.
+// For remote hosts: fetch supports HTTPS and has no pool issues.
+const IS_LOCAL = _parsed.hostname === "localhost" || _parsed.hostname === "127.0.0.1";
+const BACKEND_HOST = _parsed.hostname;
+const BACKEND_PORT = parseInt(_parsed.port || (_parsed.protocol === "https:" ? "443" : "80"), 10);
+
 function makeRequest(
   method: string,
   path: string,
@@ -29,7 +27,7 @@ function makeRequest(
         port: BACKEND_PORT,
         path,
         method,
-        agent: false, // no connection pooling — fresh socket every time
+        agent: false,
         headers: {
           ...(contentType ? { "Content-Type": contentType } : {}),
           ...(body != null ? { "Content-Length": String(Buffer.byteLength(body)) } : {}),
@@ -39,10 +37,6 @@ function makeRequest(
     );
 
     req.on("error", reject);
-
-    // Fail fast on dead connections (ECONNRESET fires instantly with agent:false).
-    // 45s covers the slowest legitimate operation (Writer LLM ~38s, ChromaDB
-    // model loading ~30s). For truly down backends ECONNREFUSED fires in <1s.
     req.setTimeout(45_000, () => req.destroy(new Error("backend timeout")));
 
     if (body) req.write(body);
@@ -59,9 +53,7 @@ async function readBody(stream: IncomingMessage): Promise<string> {
   });
 }
 
-async function proxy(req: NextRequest, path: string[]): Promise<NextResponse> {
-  const backendPath = `/agent/${path.join("/")}`;
-
+async function proxyLocal(req: NextRequest, backendPath: string): Promise<NextResponse> {
   let bodyText: string | null = null;
   if (req.method !== "GET" && req.method !== "HEAD") {
     const t = await req.text();
@@ -70,12 +62,7 @@ async function proxy(req: NextRequest, path: string[]): Promise<NextResponse> {
 
   let res: IncomingMessage;
   try {
-    res = await makeRequest(
-      req.method,
-      backendPath,
-      bodyText,
-      req.headers.get("Content-Type")
-    );
+    res = await makeRequest(req.method, backendPath, bodyText, req.headers.get("Content-Type"));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[proxy] ${req.method} ${backendPath} → ${msg}`);
@@ -84,7 +71,6 @@ async function proxy(req: NextRequest, path: string[]): Promise<NextResponse> {
 
   const contentType = (res.headers["content-type"] as string) ?? "";
 
-  // SSE: stream the node Readable → Web ReadableStream without buffering
   if (contentType.includes("text/event-stream")) {
     const webStream = Readable.toWeb(res) as ReadableStream;
     return new NextResponse(webStream, {
@@ -98,12 +84,55 @@ async function proxy(req: NextRequest, path: string[]): Promise<NextResponse> {
     });
   }
 
-  // Regular response
   const body = await readBody(res);
   return new NextResponse(body, {
     status: res.statusCode ?? 200,
     headers: { "Content-Type": contentType || "application/json" },
   });
+}
+
+async function proxyRemote(req: NextRequest, backendPath: string): Promise<NextResponse> {
+  let bodyText: string | null = null;
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    const t = await req.text();
+    if (t) bodyText = t;
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}${backendPath}`, {
+      method: req.method,
+      headers: { "Content-Type": "application/json" },
+      body: bodyText ?? undefined,
+    });
+
+    const contentType = res.headers.get("content-type") ?? "application/json";
+
+    if (contentType.includes("text/event-stream")) {
+      return new NextResponse(res.body, {
+        status: res.status,
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "X-Accel-Buffering": "no",
+        },
+      });
+    }
+
+    const data = await res.text();
+    return new NextResponse(data, {
+      status: res.status,
+      headers: { "Content-Type": contentType },
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[proxy] ${req.method} ${backendPath} → ${msg}`);
+    return NextResponse.json({ error: msg }, { status: 502 });
+  }
+}
+
+async function proxy(req: NextRequest, path: string[]): Promise<NextResponse> {
+  const backendPath = `/agent/${path.join("/")}`;
+  return IS_LOCAL ? proxyLocal(req, backendPath) : proxyRemote(req, backendPath);
 }
 
 export async function GET(

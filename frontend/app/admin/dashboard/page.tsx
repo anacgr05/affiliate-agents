@@ -94,7 +94,8 @@ export default function Dashboard() {
 
         // Connect directly to the backend — bypasses Next.js Turbopack which
         // buffers SSE responses and only delivers them after the stream closes.
-        const backendBase = `http://${window.location.hostname}:8000`;
+        // NEXT_PUBLIC_BACKEND_URL is required on Vercel (e.g. https://your-api.railway.app).
+        const backendBase = process.env.NEXT_PUBLIC_BACKEND_URL ?? `http://${window.location.hostname}:8000`;
         const es = new EventSource(`${backendBase}/agent/runs/${runId}/stream`);
         esRef.current = es;
 

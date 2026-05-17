@@ -92,9 +92,8 @@ export default function ReviewPage() {
       })
       .catch(() => setNotFound(true));
 
-    const source = new EventSource(
-      `http://localhost:8000/agent/posts/stream?slug=${slug}`
-    );
+    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
+    const source = new EventSource(`${backendUrl}/agent/posts/stream?slug=${slug}`);
     source.onmessage = (e) => {
       const data = JSON.parse(e.data);
       if (data.type === "image_ready") {
