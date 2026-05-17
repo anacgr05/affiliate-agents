@@ -1,216 +1,274 @@
-import { getPosts } from "@/lib/posts";
-import Link from "next/link";
-import { notFound } from "next/navigation";
+"use client";
 
-export async function generateStaticParams() {
-    const posts = getPosts();
-    return posts.map((post) => ({
-        slug: post.slug,
-    }));
+import { useEffect, useState } from "react";
+import { useParams } from "next/navigation";
+
+type AffiliateLink = {
+  store: string;
+  url: string;
+  price: string;
+};
+
+type Product = {
+  name: string;
+  price: string;
+  rating: number;
+  pros: string[];
+  cons: string[];
+  verdict: string;
+  affiliate_links: AffiliateLink[];
+};
+
+type BuyingStep = {
+  title: string;
+  content: string;
+};
+
+type FaqItem = {
+  question: string;
+  answer: string;
+};
+
+type Post = {
+  slug: string;
+  title: string;
+  excerpt: string;
+  image_url?: string | null;
+  image_status?: string | null;
+  hero?: {
+    title: string;
+    subtitle: string;
+    image_prompt?: string;
+    image?: string;
+  };
+  products: Product[];
+  buying_guide?: {
+    title?: string;
+    steps: BuyingStep[];
+  };
+  faq?: FaqItem[];
+};
+
+function StarRating({ rating }: { rating: number }) {
+  return (
+    <div className="flex items-center gap-1">
+      {[1, 2, 3, 4, 5].map((star) => (
+        <svg
+          key={star}
+          className={`w-4 h-4 ${star <= Math.round(rating) ? "text-yellow-400" : "text-gray-200"}`}
+          fill="currentColor"
+          viewBox="0 0 20 20"
+        >
+          <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
+        </svg>
+      ))}
+      <span className="text-sm text-gray-500 ml-1">{rating.toFixed(1)}</span>
+    </div>
+  );
 }
 
-export default async function ReviewPage({ params }: { params: Promise<{ slug: string }> }) {
-    const { slug } = await params;
-    console.log("🔍 ReviewPage rendering for slug:", slug);
-    const posts = getPosts();
-    console.log(`📊 Found ${posts.length} posts available.`);
-    const post = posts.find((p) => p.slug === slug);
-    console.log("📝 Post found:", post ? "YES" : "NO");
+export default function ReviewPage() {
+  const params = useParams();
+  const slug = params.slug as string;
 
-    // if (!post) {
-    //     notFound();
-    // }
+  const [post, setPost] = useState<Post | null>(null);
+  const [coverUrl, setCoverUrl] = useState<string | null>(null);
+  const [notFound, setNotFound] = useState(false);
+  const [openFaq, setOpenFaq] = useState<number | null>(null);
 
-    // Handle legacy posts that don't have the new structure
-    if (!post || !post.hero) {
-        return (
-            <div className="min-h-screen p-8 text-center">
-                {/* DEBUG SECTION */}
-                <div className="bg-red-100 p-4 border-b border-red-300 text-xs font-mono overflow-auto text-left mb-8">
-                    <p className="font-bold text-red-700">DEBUG INFO (POST NOT FOUND OR LEGACY):</p>
-                    <p>Requested Slug: {slug}</p>
-                    <p>Total Posts Loaded: {posts.length}</p>
-                    <p>Available Slugs:</p>
-                    <ul className="list-disc pl-4">
-                        {posts.map(p => <li key={p.slug}>{p.slug}</li>)}
-                    </ul>
-                </div>
+  useEffect(() => {
+    fetch("/api/agent/posts")
+      .then((r) => r.json())
+      .then(({ posts }: { posts: Post[] }) => {
+        const found = posts?.find((p) => p.slug === slug) ?? null;
+        if (found) {
+          setPost(found);
+          if (found.image_url && found.image_status === "ready") {
+            setCoverUrl(found.image_url);
+          }
+        } else {
+          setNotFound(true);
+        }
+      })
+      .catch(() => setNotFound(true));
 
-                <h1 className="text-2xl font-bold mb-4">{post ? "Legacy Post Format" : "Post Not Found"}</h1>
-                <p>This post was generated before the update. <Link href="/" className="text-blue-500">Go Back</Link></p>
-                {post && (
-                    <div className="mt-8 text-left max-w-2xl mx-auto prose dark:prose-invert">
-                        <h1>{post.title}</h1>
-                        <p>{post.excerpt}</p>
-                        {/* Render raw content if available */}
-                        <div className="whitespace-pre-wrap">{post.content}</div>
-                    </div>
-                )}
-            </div>
-        )
-    }
-
-    return (
-        <main className="min-h-screen bg-white text-gray-900 font-sans">
-            {/* Hero Section */}
-            <section className="relative bg-gray-900 text-white py-20 px-6">
-                <div className="max-w-4xl mx-auto text-center z-10 relative">
-                    <span className="inline-block py-1 px-3 rounded-full bg-blue-600/20 border border-blue-500/30 text-blue-300 text-sm font-medium mb-6">
-                        Review Completo 2026
-                    </span>
-                    <h1 className="text-4xl md:text-6xl font-bold mb-6 leading-tight">
-                        {post.hero.title}
-                    </h1>
-                    <p className="text-xl text-gray-300 mb-8 max-w-2xl mx-auto">
-                        {post.hero.subtitle}
-                    </p>
-                    <div className="text-sm text-gray-400">
-                        Atualizado recentemente • Leitura de 5 min
-                    </div>
-                </div>
-                {/* Abstract Background */}
-                <div className="absolute inset-0 overflow-hidden opacity-20 pointer-events-none">
-                    <div className="absolute top-[-50%] left-[-20%] w-[80%] h-[80%] rounded-full bg-blue-600 blur-[150px]" />
-                    <div className="absolute bottom-[-50%] right-[-20%] w-[80%] h-[80%] rounded-full bg-purple-600 blur-[150px]" />
-                </div>
-            </section>
-
-            <div className="max-w-4xl mx-auto px-6 py-12">
-
-                {/* Quick Summary */}
-                <div className="bg-blue-50 border border-blue-100 rounded-2xl p-8 mb-16">
-                    <h3 className="text-blue-900 font-bold text-lg mb-3 flex items-center gap-2">
-                        ⚡ Resumo Rápido
-                    </h3>
-                    <p className="text-blue-800 leading-relaxed">
-                        {post.excerpt}
-                    </p>
-                </div>
-
-                {/* Top Picks / Products */}
-                <section className="mb-20">
-                    <h2 className="text-3xl font-bold mb-10 text-center">Nossas Escolhas</h2>
-                    <div className="space-y-8">
-                        {post.products?.map((product: any, idx: number) => (
-                            <div key={idx} className="border border-gray-200 rounded-2xl overflow-hidden shadow-sm hover:shadow-md transition-shadow bg-white">
-                                <div className="p-6 md:p-8">
-                                    <div className="flex flex-col md:flex-row justify-between items-start gap-4 mb-6">
-                                        <div>
-                                            <div className="flex items-center gap-2 mb-2">
-                                                <span className="bg-gray-100 text-gray-600 px-2 py-1 rounded text-xs font-bold uppercase tracking-wider">
-                                                    #{idx + 1}
-                                                </span>
-                                                {idx === 0 && (
-                                                    <span className="bg-yellow-100 text-yellow-700 px-2 py-1 rounded text-xs font-bold uppercase tracking-wider flex items-center gap-1">
-                                                        🏆 Melhor Escolha
-                                                    </span>
-                                                )}
-                                            </div>
-                                            <h3 className="text-2xl font-bold text-gray-900">{product.name}</h3>
-                                            <div className="flex items-center gap-2 mt-2">
-                                                <div className="flex text-yellow-400">
-                                                    {"★".repeat(Math.floor(product.rating))}
-                                                    {"☆".repeat(5 - Math.floor(product.rating))}
-                                                </div>
-                                                <span className="text-sm text-gray-500">({product.rating}/5.0)</span>
-                                            </div>
-                                        </div>
-                                        <div className="text-right">
-                                            <div className="text-sm text-gray-500 mb-1">Preço Aproximado</div>
-                                            <div className="text-2xl font-bold text-green-600">{product.price}</div>
-                                        </div>
-                                    </div>
-
-                                    <div className="grid md:grid-cols-2 gap-8 mb-6">
-                                        <div>
-                                            <h4 className="font-semibold text-green-700 mb-3 flex items-center gap-2">
-                                                ✅ Prós
-                                            </h4>
-                                            <ul className="space-y-2">
-                                                {product.pros.map((pro: string, i: number) => (
-                                                    <li key={i} className="flex items-start gap-2 text-sm text-gray-600">
-                                                        <span className="text-green-500 mt-0.5">✓</span>
-                                                        {pro}
-                                                    </li>
-                                                ))}
-                                            </ul>
-                                        </div>
-                                        <div>
-                                            <h4 className="font-semibold text-red-700 mb-3 flex items-center gap-2">
-                                                ❌ Contras
-                                            </h4>
-                                            <ul className="space-y-2">
-                                                {product.cons.map((con: string, i: number) => (
-                                                    <li key={i} className="flex items-start gap-2 text-sm text-gray-600">
-                                                        <span className="text-red-500 mt-0.5">•</span>
-                                                        {con}
-                                                    </li>
-                                                ))}
-                                            </ul>
-                                        </div>
-                                    </div>
-
-                                    <div className="bg-gray-50 rounded-xl p-4 border border-gray-100">
-                                        <p className="text-sm text-gray-700 mb-3">
-                                            <strong className="text-gray-900">Veredito:</strong> {product.verdict}
-                                        </p>
-
-                                        {/* Affiliate Links */}
-                                        {product.affiliate_links && product.affiliate_links.length > 0 && (
-                                            <div className="flex flex-wrap gap-2 mt-4 pt-4 border-t border-gray-200">
-                                                {product.affiliate_links.map((link: any, linkIdx: number) => (
-                                                    <a
-                                                        key={linkIdx}
-                                                        href={link.url}
-                                                        target="_blank"
-                                                        rel="noopener noreferrer"
-                                                        className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
-                                                    >
-                                                        🛒 Comprar na {link.store}
-                                                        {link.price && <span className="opacity-90 text-xs border-l border-blue-500 pl-2 ml-1">{link.price}</span>}
-                                                    </a>
-                                                ))}
-                                            </div>
-                                        )}
-                                    </div>
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-                </section>
-
-                {/* Buying Guide */}
-                <section className="mb-20">
-                    <h2 className="text-3xl font-bold mb-10">Guia de Compra</h2>
-                    <div className="space-y-12">
-                        {post.buying_guide?.steps?.map((step: any, idx: number) => (
-                            <div key={idx} className="flex gap-6">
-                                <div className="flex-shrink-0 w-12 h-12 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center font-bold text-xl">
-                                    {idx + 1}
-                                </div>
-                                <div>
-                                    <h3 className="text-xl font-bold mb-3">{step.title}</h3>
-                                    <p className="text-gray-600 leading-relaxed">{step.content}</p>
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-                </section>
-
-                {/* FAQ */}
-                <section className="mb-20 bg-gray-50 rounded-3xl p-8 md:p-12">
-                    <h2 className="text-3xl font-bold mb-10 text-center">Perguntas Frequentes</h2>
-                    <div className="space-y-6 max-w-3xl mx-auto">
-                        {post.faq?.map((item: any, idx: number) => (
-                            <div key={idx} className="bg-white rounded-xl p-6 shadow-sm">
-                                <h3 className="font-bold text-lg mb-3 text-gray-900">{item.question}</h3>
-                                <p className="text-gray-600">{item.answer}</p>
-                            </div>
-                        ))}
-                    </div>
-                </section>
-
-            </div>
-        </main>
+    const source = new EventSource(
+      `http://localhost:8000/agent/posts/stream?slug=${slug}`
     );
+    source.onmessage = (e) => {
+      const data = JSON.parse(e.data);
+      if (data.type === "image_ready") {
+        setCoverUrl(data.url);
+        source.close();
+      } else if (data.type === "image_failed") {
+        source.close();
+      }
+    };
+    return () => source.close();
+  }, [slug]);
+
+  if (notFound) {
+    return <p className="p-8 text-gray-500">Post não encontrado.</p>;
+  }
+
+  if (!post) {
+    return (
+      <div className="max-w-4xl mx-auto p-6 animate-pulse space-y-4">
+        <div className="h-64 bg-gray-200 rounded-xl" />
+        <div className="h-8 bg-gray-200 rounded w-3/4" />
+        <div className="h-4 bg-gray-200 rounded w-full" />
+        <div className="h-4 bg-gray-200 rounded w-5/6" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-4xl mx-auto px-4 py-8 space-y-12">
+
+      {/* ── Hero ─────────────────────────────────────────────── */}
+      <section>
+        <div className="w-full h-72 bg-gray-100 rounded-2xl overflow-hidden mb-6 relative">
+          {coverUrl ? (
+            <img src={coverUrl} alt={post.hero?.title ?? post.title} className="object-cover w-full h-full" />
+          ) : (
+            <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100">
+              <p className="animate-pulse text-gray-400 text-sm">Gerando imagem com IA...</p>
+            </div>
+          )}
+        </div>
+
+        {post.hero?.title && (
+          <h1 className="text-4xl font-bold text-gray-900 mb-3 leading-tight">
+            {post.hero.title}
+          </h1>
+        )}
+        {post.hero?.subtitle && (
+          <p className="text-xl text-gray-500 mb-4">{post.hero.subtitle}</p>
+        )}
+        {(!post.hero?.title) && (
+          <h1 className="text-4xl font-bold text-gray-900 mb-3">{post.title}</h1>
+        )}
+        <p className="text-gray-600 text-lg">{post.excerpt}</p>
+      </section>
+
+      {/* ── Produtos ─────────────────────────────────────────── */}
+      {post.products?.length > 0 && (
+        <section className="space-y-6">
+          <h2 className="text-2xl font-bold text-gray-900 border-b border-gray-200 pb-3">
+            Produtos em Destaque
+          </h2>
+          {post.products.map((product, i) => (
+            <div key={i} className="border border-gray-200 rounded-xl p-6 hover:shadow-md transition-shadow">
+              <div className="flex flex-wrap justify-between items-start gap-2 mb-3">
+                <div>
+                  <h3 className="text-xl font-bold text-gray-900">{product.name}</h3>
+                  <StarRating rating={product.rating} />
+                </div>
+                <span className="text-2xl font-bold text-green-700">{product.price}</span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4 text-sm">
+                <div className="bg-green-50 rounded-lg p-3">
+                  <p className="font-semibold text-green-800 mb-2">Prós</p>
+                  <ul className="space-y-1">
+                    {product.pros.map((pro, j) => (
+                      <li key={j} className="text-green-700 flex gap-2">
+                        <span className="shrink-0">✓</span>{pro}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+                <div className="bg-red-50 rounded-lg p-3">
+                  <p className="font-semibold text-red-800 mb-2">Contras</p>
+                  <ul className="space-y-1">
+                    {product.cons.map((con, j) => (
+                      <li key={j} className="text-red-700 flex gap-2">
+                        <span className="shrink-0">✗</span>{con}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+
+              <p className="text-gray-600 text-sm italic mb-4 border-l-4 border-blue-200 pl-3">
+                {product.verdict}
+              </p>
+
+              {product.affiliate_links?.length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  {product.affiliate_links.map((link, j) => (
+                    <a
+                      key={j}
+                      href={link.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-2 bg-blue-600 text-white px-5 py-2 rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
+                    >
+                      {link.store} — {link.price}
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                      </svg>
+                    </a>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </section>
+      )}
+
+      {/* ── Guia de Compra ────────────────────────────────────── */}
+      {(post.buying_guide?.steps?.length ?? 0) > 0 && (
+        <section className="space-y-4">
+          <h2 className="text-2xl font-bold text-gray-900 border-b border-gray-200 pb-3">
+            {post.buying_guide?.title ?? "Guia de Compra"}
+          </h2>
+          <div className="space-y-4">
+            {post.buying_guide?.steps.map((step, i) => (
+              <div key={i} className="flex gap-4">
+                <div className="shrink-0 w-8 h-8 rounded-full bg-blue-600 text-white flex items-center justify-center font-bold text-sm">
+                  {i + 1}
+                </div>
+                <div>
+                  <h3 className="font-semibold text-gray-900 mb-1">{step.title}</h3>
+                  <p className="text-gray-600 text-sm leading-relaxed">{step.content}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* ── FAQ ──────────────────────────────────────────────── */}
+      {(post.faq?.length ?? 0) > 0 && (
+        <section className="space-y-3">
+          <h2 className="text-2xl font-bold text-gray-900 border-b border-gray-200 pb-3">
+            Perguntas Frequentes
+          </h2>
+          {post.faq?.map((item, i) => (
+            <div key={i} className="border border-gray-200 rounded-xl overflow-hidden">
+              <button
+                className="w-full text-left px-5 py-4 font-semibold text-gray-900 hover:bg-gray-50 flex justify-between items-center gap-4"
+                onClick={() => setOpenFaq(openFaq === i ? null : i)}
+              >
+                <span>{item.question}</span>
+                <svg
+                  className={`w-5 h-5 text-gray-400 shrink-0 transition-transform ${openFaq === i ? "rotate-180" : ""}`}
+                  fill="none" viewBox="0 0 24 24" stroke="currentColor"
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                </svg>
+              </button>
+              {openFaq === i && (
+                <div className="px-5 pb-4 text-gray-600 text-sm leading-relaxed border-t border-gray-100 pt-3">
+                  {item.answer}
+                </div>
+              )}
+            </div>
+          ))}
+        </section>
+      )}
+
+    </div>
+  );
 }
