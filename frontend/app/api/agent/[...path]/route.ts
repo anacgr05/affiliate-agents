@@ -175,16 +175,14 @@ async function proxy(req: NextRequest, path: string[]): Promise<NextResponse> {
 
 export async function GET(
   req: NextRequest,
-  context: { params: { path: string[] } | Promise<{ path: string[] }> }
+  { params }: { params: Promise<{ path: string[] }> }
 ) {
-  const params = await Promise.resolve(context.params);
-  return proxy(req, params.path);
+  return proxy(req, (await params).path);
 }
 
 export async function POST(
   req: NextRequest,
-  context: { params: { path: string[] } | Promise<{ path: string[] }> }
+  { params }: { params: Promise<{ path: string[] }> }
 ) {
-  const params = await Promise.resolve(context.params);
-  return proxy(req, params.path);
+  return proxy(req, (await params).path);
 }
